@@ -184,6 +184,8 @@ curl -X POST http://127.0.0.1:$PORT \
 
 After changing extension code: remove from Thunderbird, restart, reinstall the XPI, restart again. Thunderbird caches aggressively.
 
+**AWS Lambda (ingest zip):** run `npm run package:lambda` to create `dist/lambda-ingest.zip`, then follow [docs/lambda-zip-deploy.md](docs/lambda-zip-deploy.md) to upload it in the Lambda console.
+
 ---
 
 ## Project structure

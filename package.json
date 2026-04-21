@@ -27,5 +27,11 @@
   ],
   "engines": {
     "node": ">=18.0.0"
+  },
+  "scripts": {
+    "ingest:step1": "node pipeline/ingest-step1.cjs",
+    "ingest:step1:dry": "node pipeline/ingest-step1.cjs --dry-run --memory-dir fixtures/email-history-memory --memory-days 500",
+    "test:lambda-handler": "node --test test/lambda-handler.test.cjs",
+    "package:lambda": "node scripts/package-lambda-zip.cjs"
   }
 }

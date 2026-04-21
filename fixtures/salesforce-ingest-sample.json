@@ -1,0 +1,34 @@
+{
+  "dryRun": true,
+  "soql": "(fixture) SELECT Id, Email, FirstName, LastName FROM Contact LIMIT 3",
+  "totalSize": 2,
+  "done": true,
+  "records": [
+    {
+      "attributes": { "type": "Contact", "url": "/services/data/v59.0/sobjects/Contact/001FIXTURE001" },
+      "Id": "001FIXTURE001",
+      "Email": "operator@example.com",
+      "FirstName": "Sample",
+      "LastName": "Operator",
+      "Phone": null
+    },
+    {
+      "attributes": { "type": "Contact", "url": "/services/data/v59.0/sobjects/Contact/001FIXTURE002" },
+      "Id": "001FIXTURE002",
+      "Email": "reviewer@example.com",
+      "FirstName": "Sample",
+      "LastName": "Reviewer",
+      "Phone": null
+    }
+  ],
+  "campaignContext": {
+    "note": "Extend this fixture or SOQL to include CampaignMember / KPI custom fields as needed."
+  }
+}
+
+
+
+
+
+
+
