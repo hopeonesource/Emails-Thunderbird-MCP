@@ -1,9 +1,229 @@
-# Thunderbird MCP
+# Hope1Source - Emails Thunderbird MCP & Weekly Check-in Drafts
 
-[![Tools](https://img.shields.io/badge/35_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#what-you-can-do)
-[![Localhost Only](https://img.shields.io/badge/Privacy-localhost_only-green.svg)](#security)
+[![Tools](https://img.shields.io/badge/35_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#thunderbird-mcp---what-you-can-do)
+[![Localhost Only](https://img.shields.io/badge/Privacy-localhost_only-green.svg)](#thunderbird-mcp-security)
 [![Thunderbird](https://img.shields.io/badge/Thunderbird-102%2B-0a84ff.svg)](https://www.thunderbird.net/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-grey.svg)](LICENSE)
+
+This repository contains two related capabilities:
+
+1. **Thunderbird MCP** -- a local extension + bridge that exposes 35 tools so any MCP-compatible AI assistant can read, compose, and organize Thunderbird mail.
+2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible accounts from Salesforce via JWT/SOQL, generates a polished mobile-friendly HTML email per account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hopewithlove.org`, and writes a `Historical_Data__c` record (with the email rendered as Markdown) back to Salesforce.
+
+Jump to:
+
+- [Weekly Check-in Email Drafts (V1)](#weekly-check-in-email-drafts-v1)
+- [Thunderbird MCP](#thunderbird-mcp)
+
+---
+
+## Weekly Check-in Email Drafts (V1)
+
+Tracked in Linear under [Weekly Check-in Email Drafts (V1)](https://linear.app/h1scheck-ins/project/weekly-check-in-email-drafts-v1-a17d99f5fb6b) (epic `HOP-43`).
+
+### Architecture
+
+```
++----------------+    +---------------------------+    +-----------------+    +----------------+
+|  EventBridge   | -> |  Lambda: weekly-drafts-   | -> |  AWS Bedrock    |    | Gmail API      |
+|  weekly cron   |    |  handler.handler          |    |  Claude Sonnet  |    | drafts.create  |
++----------------+    |                           |    |  4.5            |    | (gmail.compose)|
+                      |  1. Salesforce JWT/SOQL   |    +-----------------+    +----------------+
+                      |  2. Eligibility filter    |          ^                       ^
+                      |  3. Per-account loop      |----------+                       |
+                      |  4. Bedrock generate      |                                  |
+                      |  5. Gmail draft           |----------------------------------+
+                      |  6. Historical_Data__c    |          +-------------------------+
+                      |     + Markdown attached   | -------> | Salesforce REST         |
+                      +---------------------------+          | (Account, Files)        |
+                                                             +-------------------------+
+```
+
+**Source of truth: Salesforce.** No DynamoDB in V1. No emails are auto-sent: a human reviews and sends each draft manually from Gmail.
+
+### Account isolation invariants
+
+Account isolation is the single most important property of this pipeline. Every step is keyed strictly by Salesforce `Account.Id`:
+
+- The Bedrock prompt receives data for **one** account at a time and is told never to reference any other account.
+- The Gmail draft is created with that account's data only.
+- The `Historical_Data__c` record is written under that exact `Account__c` parent.
+- A failure on one account never blocks any other account in the same weekly run.
+
+### Eligibility filter
+
+An Account is eligible only when **all four** Salesforce checkboxes match:
+
+| Field (default API name)       | Required value | Override env var               |
+|--------------------------------|----------------|--------------------------------|
+| `Send_Feedback_Emails__c`      | `TRUE`         | `SF_FIELD_SEND_FEEDBACK`       |
+| `Email__c` (email opt-out)     | `FALSE`        | `SF_FIELD_EMAIL_OPT_OUT`       |
+| `Do_Not_Contact__c`            | `FALSE`        | `SF_FIELD_DO_NOT_CONTACT`      |
+| `AI_Insights_Enabled__c`       | `TRUE`         | `SF_FIELD_AI_INSIGHTS`         |
+
+> **Confirm `Email__c`:** the eligibility says "Email == False" (opt-out semantics). If your org uses a different API name for the opt-out checkbox, set `SF_FIELD_EMAIL_OPT_OUT` to that name. Do not point this at the `Email` text field on Contact -- it must be a checkbox on Account.
+
+### `Historical_Data__c` record
+
+Per (Account, week) the Lambda creates one record with:
+
+| Field (default)            | Type   | Description                                                |
+|----------------------------|--------|------------------------------------------------------------|
+| `Account__c`               | Lookup | Parent Account                                             |
+| `Week_Start__c`            | Date   | ISO Monday of the week                                     |
+| `Week_End__c`              | Date   | ISO Sunday of the week                                     |
+| `Gmail_Draft_Id__c`        | Text   | Gmail draft id (for the human reviewer)                    |
+| `Gmail_Thread_Id__c`       | Text   | Gmail thread id                                            |
+| `Bedrock_Model__c`         | Text   | Model id (e.g. `anthropic.claude-sonnet-4-5`)              |
+| `Source_Data_Hash__c`      | Text   | SHA-256 of the input metrics for idempotency / audit       |
+| `Status__c`                | Text   | `draft_created`, `sent`, `failed`, `skipped`               |
+
+The full email body is attached as a Salesforce **File (ContentVersion)** named `weekly-checkin-email-<weekStart>.md`. Override field API names via `SF_HD_*` envs.
+
+**Idempotency:** before creating, the Lambda queries for an existing `Historical_Data__c` with `(Account__c = X, Week_Start__c = Y, Status__c IN ('draft_created','sent'))`. If found, it skips that account.
+
+### File layout (V1)
+
+```
+pipeline/
+  weekly-drafts-handler.js                # Lambda entry point
+  lib/
+    salesforce-jwt.cjs                    # existing JWT auth (unchanged)
+    sf-rest.cjs                           # SOQL + sObject create + File upload
+    eligibility.cjs                       # Account eligibility filter / SOQL builder
+    bedrock-email.cjs                     # Bedrock Sonnet 4.5 HTML email generator
+    google-jwt.cjs                        # Google service-account JWT (DWD)
+    gmail-draft.cjs                       # Gmail draft (drafts.create only - never send)
+    historical-data.cjs                   # Historical_Data__c writeback + Markdown file
+    week-window.cjs                       # ISO week window helper
+    run-weekly-drafts.cjs                 # Orchestrator
+fixtures/
+  weekly-eligible-accounts.json           # Dry-run sample
+test/
+  weekly-drafts.test.cjs                  # Unit tests (mocked Bedrock/Gmail/Salesforce)
+```
+
+### Setup
+
+#### 1. Salesforce (already in place)
+
+The existing JWT/SOQL Connected App is reused. Confirm the integration user has:
+
+- Read on `Account` and the four eligibility checkboxes
+- Create on `Historical_Data__c`, `ContentVersion`, `ContentDocumentLink`
+- Profile/permission set granted on the Connected App
+
+If your eligibility or `Historical_Data__c` field API names differ from the defaults, set the `SF_FIELD_*` and `SF_HD_*` env vars (see `.env.example`).
+
+#### 2. Google Workspace for Nonprofits
+
+Create a Google Cloud project under the Workspace org and:
+
+1. **Enable** the Gmail API.
+2. Create a **service account**. Generate a JSON key.
+3. In Workspace Admin (`admin.google.com`) **Security > Access and data control > API controls > Domain-wide delegation**, add the service account's client ID with the single scope:
+   - `https://www.googleapis.com/auth/gmail.compose`
+4. Make sure `checkins@hopewithlove.org` is a real, monitored Workspace mailbox in `hopewithlove.org`.
+5. Set in Lambda env:
+   - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
+   - `GOOGLE_PRIVATE_KEY` (PEM, escape newlines as `\n`) **or** `GOOGLE_PRIVATE_KEY_PATH`
+   - `GMAIL_SUBJECT=checkins@hopewithlove.org`
+   - `GMAIL_FROM=Hope1Source Check-ins <checkins@hopewithlove.org>`
+
+> **Why `gmail.compose` only?** This scope can read and write the user's drafts but **cannot send mail**. This is the smallest scope that lets the Lambda create drafts safely. A human still has to click Send in Gmail.
+
+#### 3. AWS Bedrock
+
+1. In the AWS console, **request access** to `anthropic.claude-sonnet-4-5` in the region you plan to use (e.g. `us-east-1`).
+2. Set `BEDROCK_MODEL_ID` if you want to override the default. Set `AWS_REGION` (already set in Lambda automatically).
+
+#### 4. AWS Lambda (V1)
+
+- Runtime: `nodejs20.x`
+- Handler: `pipeline/weekly-drafts-handler.handler`
+- Memory: 512 MB (Bedrock invocation is light; bump to 1024 MB if you add attachments)
+- Timeout: 5 minutes
+- Trigger: EventBridge Scheduler, weekly (e.g. `cron(0 13 ? * MON *)` UTC = 09:00 ET Mondays)
+
+**IAM role (least privilege):**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": ["bedrock:InvokeModel"],
+      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5" },
+    { "Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/salesforce-*",
+        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/google-*"
+      ] },
+    { "Effect": "Allow", "Action": ["logs:CreateLogStream","logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:<acct>:log-group:/aws/lambda/hope1source-weekly-drafts:*" }
+  ]
+}
+```
+
+#### 5. Secrets
+
+| Secret                       | Storage                                  |
+|------------------------------|------------------------------------------|
+| Salesforce Connected App key | AWS Secrets Manager `hope1source/salesforce-jwt` |
+| Google service account key   | AWS Secrets Manager `hope1source/google-service-account` |
+| Bedrock                      | IAM role only -- no static keys          |
+
+Loader convention: secrets are read at Lambda init and exposed via `process.env`. Keep the JSON shape simple: `{ "SF_PRIVATE_KEY": "...", "GOOGLE_PRIVATE_KEY": "..." }`. Never commit real values.
+
+### Local development & dry-run
+
+```bash
+npm install
+npm run test:weekly-drafts          # all unit tests, no network
+npm run weekly-drafts:dry           # full dry run with the bundled fixture
+```
+
+Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic stub HTML/Markdown body from the fixture so you can iterate on the orchestrator and downstream wiring without credentials.
+
+### Operations
+
+- **Logs:** CloudWatch log group `/aws/lambda/hope1source-weekly-drafts`. Per-account log line on success/skip/failure.
+- **Failure isolation:** one account's failure increments `summary.failed` but never blocks the others. The handler returns `ok: false` if any account failed so you can alarm on it.
+- **Alarms:** create a CloudWatch metric filter on `"failed":` > 0 in the handler return JSON, or on `Errors > 0` for the function.
+- **Idempotency:** safe to re-run within the same week. Existing draft_created/sent rows are skipped.
+- **Manual invoke:** send `{ "dryRun": true }` to test against the bundled fixture.
+
+### Security best practices (V1)
+
+- **Least-privilege IAM** as above; scope Bedrock to the specific model ARN.
+- **Drafts only.** Gmail scope is `gmail.compose`, not `gmail.send`.
+- **No PII in logs.** Log only `accountId`, status, model id, draft id, and hashes -- never email body or check-in payloads.
+- **Account isolation.** Bedrock prompt receives data for one account at a time; tests assert no cross-account bleed.
+- **Idempotency by `Source_Data_Hash__c`.** If the same week's input hasn't changed, you can detect re-runs.
+- **Secrets in Secrets Manager.** `.env` only ever holds dev values; real values never enter the repo.
+- **Network egress.** Lambda only needs outbound HTTPS to Salesforce, Google, and Bedrock VPC endpoint (or public Bedrock endpoint).
+
+### Troubleshooting
+
+| Symptom                                                | Likely cause                                                                              |
+|--------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `Salesforce token error HTTP 400`                      | JWT iss/sub/aud mismatch, or the Connected App is not pre-authorized for the integration user |
+| `Salesforce SOQL failed HTTP 401`                      | Access token expired or instance URL mismatched                                           |
+| `Salesforce SOQL failed ... INVALID_FIELD`             | Field API names in your org differ from defaults -- set `SF_FIELD_*` envs                 |
+| `Google token error ... unauthorized_client`           | Service account is missing domain-wide delegation for the `gmail.compose` scope           |
+| `Gmail draft create failed HTTP 403`                   | Subject mailbox is not in the Workspace, or DWD is missing                                |
+| `Bedrock InvokeModel ... AccessDenied`                 | Model access not approved in this region, or IAM role missing `bedrock:InvokeModel`       |
+| Re-run produces no drafts                              | Idempotency: existing `Historical_Data__c` row for the week. Update or delete and retry.  |
+
+### Future (V2)
+
+- Reply ingestion + DynamoDB Q&A scoped strictly by Salesforce `Account.Id` (mapped via the replying Contact).
+- Track replies/threads on `Historical_Data__c` and surface them in Salesforce.
+
+---
+
+## Thunderbird MCP
+
+[![Tools](https://img.shields.io/badge/35_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#thunderbird-mcp---what-you-can-do)
 
 Give your AI assistant full access to Thunderbird -- search mail, compose messages, manage filters, and organize your inbox. All through the [Model Context Protocol](https://modelcontextprotocol.io/).
 
@@ -13,9 +233,7 @@ Give your AI assistant full access to Thunderbird -- search mail, compose messag
 
 > Inspired by [bb1/thunderbird-mcp](https://github.com/bb1/thunderbird-mcp). Rewritten from scratch with a bundled HTTP server, proper MIME decoding, and UTF-8 handling throughout.
 
----
-
-## Why?
+### Thunderbird MCP - Why?
 
 Thunderbird has no official API for AI tools. Your AI assistant can't read your email, can't help you draft replies, can't organize your inbox. This extension fixes that -- it exposes 35 tools over MCP so any compatible AI (Claude, GPT, local models) can work with your mail the way you'd expect.
 
@@ -35,7 +253,7 @@ The Thunderbird extension embeds a local HTTP server with session-scoped auth to
 
 ---
 
-## What you can do
+## Thunderbird MCP - What you can do
 
 ### Mail
 
@@ -141,7 +359,7 @@ That's it. Your AI can now access Thunderbird.
 
 ---
 
-## Security
+## Thunderbird MCP security
 
 - **Auth tokens**: The HTTP server requires a session-scoped bearer token. Generated on startup, written to `<TmpD>/thunderbird-mcp/connection.json` with 0600 permissions. The bridge reads this automatically.
 - **Dynamic port**: Tries ports 8765-8774, records the actual port in the connection file. No hardcoded port dependency.

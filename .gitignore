@@ -18,6 +18,7 @@ Thumbs.db
 
 # MCP config (contains local paths)
 .mcp.json
+.cursor/
 
 # Node.js
 node_modules/

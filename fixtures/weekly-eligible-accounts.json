@@ -1,0 +1,41 @@
+[
+  {
+    "attributes": { "type": "Account", "url": "/services/data/v59.0/sobjects/Account/001FIXTUREACCT01" },
+    "Id": "001FIXTUREACCT01",
+    "Name": "Example Org A",
+    "Send_Feedback_Emails__c": true,
+    "Email__c": false,
+    "Do_Not_Contact__c": false,
+    "AI_Insights_Enabled__c": true,
+    "weeklyMetrics": {
+      "checkInsCompleted": 12,
+      "newClientsServed": 3,
+      "averageWaitMinutes": 4.5,
+      "topServiceCategory": "Food Pantry"
+    },
+    "recentCheckins": [
+      { "checkInId": "a1", "submittedAt": "2026-04-28T14:02:00Z", "category": "Food Pantry" },
+      { "checkInId": "a2", "submittedAt": "2026-04-29T10:18:00Z", "category": "Job Help" }
+    ],
+    "notes": "Resolved supply delay this week."
+  },
+  {
+    "attributes": { "type": "Account", "url": "/services/data/v59.0/sobjects/Account/001FIXTUREACCT02" },
+    "Id": "001FIXTUREACCT02",
+    "Name": "Example Org B",
+    "Send_Feedback_Emails__c": true,
+    "Email__c": false,
+    "Do_Not_Contact__c": false,
+    "AI_Insights_Enabled__c": true,
+    "weeklyMetrics": {
+      "checkInsCompleted": 5,
+      "newClientsServed": 1,
+      "averageWaitMinutes": 9.1,
+      "topServiceCategory": "Clothing"
+    },
+    "recentCheckins": [
+      { "checkInId": "b1", "submittedAt": "2026-04-27T09:00:00Z", "category": "Clothing" }
+    ],
+    "notes": "First full week post-system upgrade."
+  }
+]
