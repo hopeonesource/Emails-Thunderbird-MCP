@@ -3,19 +3,58 @@
     "attributes": { "type": "Account", "url": "/services/data/v59.0/sobjects/Account/001FIXTUREACCT01" },
     "Id": "001FIXTUREACCT01",
     "Name": "Example Org A",
-    "Send_Feedback_Emails__c": true,
-    "Email__c": false,
-    "Do_Not_Contact__c": false,
-    "AI_Insights_Enabled__c": true,
-    "weeklyMetrics": {
-      "checkInsCompleted": 12,
-      "newClientsServed": 3,
-      "averageWaitMinutes": 4.5,
-      "topServiceCategory": "Food Pantry"
+    "recipients": [
+      {
+        "contactId": "003FIXTURESERVICE01",
+        "firstName": "Sam",
+        "lastName": "Provider",
+        "email": "sam.provider@example.org",
+        "lastFeedbackEmailSent": null
+      },
+      {
+        "contactId": "003FIXTURESERVICE02",
+        "firstName": "Riley",
+        "lastName": "Provider",
+        "email": "riley.provider@example.org",
+        "lastFeedbackEmailSent": null
+      }
+    ],
+    "historicalData": {
+      "attributes": { "type": "Historical_Data__c" },
+      "Id": "a10FIXTUREHD01",
+      "Account__c": "001FIXTUREACCT01",
+      "Date_of_Generation__c": "2026-04-30",
+      "Total_Feedback__c": 128,
+      "Feedback_Last_7_Days__c": 12,
+      "Feedback_Last_30_Days__c": 44,
+      "Avg_Rating_All_Time__c": 4.6,
+      "Last_7_Days_Rating_Avg__c": 4.8,
+      "Weekly_Last_7_Days_Change__c": 2,
+      "Weekly_Last_7_Days_Rating_Change__c": 0.2,
+      "Total_of_5_Star_Reviews__c": 93,
+      "Weekly_5_Star_Review_Change__c": 4
     },
-    "recentCheckins": [
-      { "checkInId": "a1", "submittedAt": "2026-04-28T14:02:00Z", "category": "Food Pantry" },
-      { "checkInId": "a2", "submittedAt": "2026-04-29T10:18:00Z", "category": "Job Help" }
+    "recentFeedback": [
+      {
+        "Id": "a20FIXTUREFB01",
+        "Account__c": "001FIXTUREACCT01",
+        "Contact__c": "003FIXTURECLIENT01",
+        "Submission_Date__c": "2026-04-28T14:02:00Z",
+        "Rating__c": 5,
+        "Description__c": "The pantry appointment was quick and kind.",
+        "How_Hopeful_Are_You__c": "Very hopeful",
+        "What_would_make_you_more_hopeful__c": "More job leads."
+      },
+      {
+        "Id": "a20FIXTUREFB02",
+        "Account__c": "001FIXTUREACCT01",
+        "Contact__c": "003FIXTURECLIENT02",
+        "Submission_Date__c": "2026-04-29T10:18:00Z",
+        "Rating__c": 4,
+        "Description__c": "Helpful staff and short wait.",
+        "How_Hopeful_Are_You__c": "Hopeful",
+        "What_would_make_you_more_hopeful__c": "Evening hours."
+      }
     ],
     "notes": "Resolved supply delay this week."
   },
@@ -23,18 +62,41 @@
     "attributes": { "type": "Account", "url": "/services/data/v59.0/sobjects/Account/001FIXTUREACCT02" },
     "Id": "001FIXTUREACCT02",
     "Name": "Example Org B",
-    "Send_Feedback_Emails__c": true,
-    "Email__c": false,
-    "Do_Not_Contact__c": false,
-    "AI_Insights_Enabled__c": true,
-    "weeklyMetrics": {
-      "checkInsCompleted": 5,
-      "newClientsServed": 1,
-      "averageWaitMinutes": 9.1,
-      "topServiceCategory": "Clothing"
+    "recipients": [
+      {
+        "contactId": "003FIXTURESERVICE03",
+        "firstName": "Jordan",
+        "lastName": "Provider",
+        "email": "jordan.provider@example.org",
+        "lastFeedbackEmailSent": null
+      }
+    ],
+    "historicalData": {
+      "attributes": { "type": "Historical_Data__c" },
+      "Id": "a10FIXTUREHD02",
+      "Account__c": "001FIXTUREACCT02",
+      "Date_of_Generation__c": "2026-04-30",
+      "Total_Feedback__c": 52,
+      "Feedback_Last_7_Days__c": 5,
+      "Feedback_Last_30_Days__c": 19,
+      "Avg_Rating_All_Time__c": 4.1,
+      "Last_7_Days_Rating_Avg__c": 4.0,
+      "Weekly_Last_7_Days_Change__c": 1,
+      "Weekly_Last_7_Days_Rating_Change__c": -0.1,
+      "Total_of_5_Star_Reviews__c": 28,
+      "Weekly_5_Star_Review_Change__c": 1
     },
-    "recentCheckins": [
-      { "checkInId": "b1", "submittedAt": "2026-04-27T09:00:00Z", "category": "Clothing" }
+    "recentFeedback": [
+      {
+        "Id": "a20FIXTUREFB03",
+        "Account__c": "001FIXTUREACCT02",
+        "Contact__c": "003FIXTURECLIENT03",
+        "Submission_Date__c": "2026-04-27T09:00:00Z",
+        "Rating__c": 4,
+        "Description__c": "The clothing visit helped me get ready for work.",
+        "How_Hopeful_Are_You__c": "Hopeful",
+        "What_would_make_you_more_hopeful__c": "Transportation options."
+      }
     ],
     "notes": "First full week post-system upgrade."
   }

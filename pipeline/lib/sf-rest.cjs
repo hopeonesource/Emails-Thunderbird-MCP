@@ -82,6 +82,30 @@ async function createSObject(instanceUrl, accessToken, sobjectName, body) {
   return res.json;
 }
 
+async function updateSObject(instanceUrl, accessToken, sobjectName, id, body) {
+  const u = new URL(joinUrl(instanceUrl, `/services/data/v59.0/sobjects/${encodeURIComponent(sobjectName)}/${encodeURIComponent(id)}`));
+  const json = JSON.stringify(body);
+  const res = await request(
+    {
+      hostname: u.hostname,
+      port: 443,
+      path: u.pathname,
+      method: "PATCH",
+      headers: {
+        ...authHeader(accessToken),
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(json),
+      },
+    },
+    json
+  );
+  if (res.statusCode !== 204) {
+    const msg = (res.json && (res.json[0]?.message || res.json.message)) || res.raw?.slice(0, 400);
+    throw new Error(`Salesforce update ${sobjectName}/${id} failed HTTP ${res.statusCode}: ${msg}`);
+  }
+  return { id, success: true };
+}
+
 /**
  * Create a Salesforce File (ContentVersion) and link it to a parent record.
  * Returns { contentVersionId, contentDocumentId, contentDocumentLinkId }.
@@ -113,4 +137,4 @@ async function uploadFileToRecord(instanceUrl, accessToken, parentId, filename, 
   };
 }
 
-module.exports = { querySoql, createSObject, uploadFileToRecord };
+module.exports = { querySoql, createSObject, updateSObject, uploadFileToRecord };

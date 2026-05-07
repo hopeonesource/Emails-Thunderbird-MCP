@@ -4,13 +4,16 @@ const fs = require("fs");
 const path = require("path");
 
 const { getJwtAccessToken } = require("./salesforce-jwt.cjs");
-const { fetchEligibleAccounts, FIELD_DEFAULTS: ELIG_DEFAULTS } = require("./eligibility.cjs");
+const { fetchEligibleAccounts } = require("./eligibility.cjs");
 const { generateWeeklyEmail } = require("./bedrock-email.cjs");
 const { getAccessToken: getGoogleAccessToken } = require("./google-jwt.cjs");
 const { createDraft } = require("./gmail-draft.cjs");
 const {
   existsForWeek: existsForWeekDefault,
+  fetchLatestHistoricalData: fetchLatestHistoricalDataDefault,
+  fetchRecentClientFeedback: fetchRecentClientFeedbackDefault,
   recordWeeklyHistory: recordWeeklyHistoryDefault,
+  stampFeedbackEmailSent: stampFeedbackEmailSentDefault,
 } = require("./historical-data.cjs");
 const { isoWeekWindow } = require("./week-window.cjs");
 
@@ -19,12 +22,12 @@ const { isoWeekWindow } = require("./week-window.cjs");
  *
  * options:
  *   dryRun         (bool) - skip Bedrock/Gmail/Salesforce-write side effects, return planned actions
- *   fixturePath    (string) - dry-run accounts fixture
+ *   fixturePath    (string) - dry-run account/recipient fixture
  *   nowIso         (string) - override current time (for tests)
  *   bedrockGenerate(account) -> { subject, htmlBody, markdownBody, modelId, sourceDataHash }
  *   gmailCreateDraft({ subject, htmlBody, accountId }) -> { draftId, threadId, messageId }
  *   sf             { instanceUrl, accessToken } - inject for tests; otherwise built from JWT
- *   recipients     {[accountId]: [emails]} - reviewer recipient for the draft
+ *   recipients     {[accountId]: [emails]} - override recipients for the draft
  *
  * Account isolation invariant: every Bedrock call, every Gmail draft, and every
  * Salesforce write is keyed strictly by the Salesforce Account.Id of the record
@@ -35,7 +38,10 @@ async function runWeeklyDrafts(options = {}) {
   const now = options.nowIso ? new Date(options.nowIso) : new Date();
   const { weekStart, weekEnd } = isoWeekWindow(now);
   const existsForWeek = options.existsForWeek || existsForWeekDefault;
+  const fetchLatestHistoricalData = options.fetchLatestHistoricalData || fetchLatestHistoricalDataDefault;
+  const fetchRecentClientFeedback = options.fetchRecentClientFeedback || fetchRecentClientFeedbackDefault;
   const recordWeeklyHistory = options.recordWeeklyHistory || recordWeeklyHistoryDefault;
+  const stampFeedbackEmailSent = options.stampFeedbackEmailSent || stampFeedbackEmailSentDefault;
 
   const summary = {
     runStartedAt: now.toISOString(),
@@ -49,17 +55,22 @@ async function runWeeklyDrafts(options = {}) {
     perAccount: [],
   };
 
-  const accounts = await loadEligibleAccounts(options, dryRun);
-  summary.totalEligible = accounts.length;
+  const accountContexts = await loadEligibleAccounts(options, dryRun);
+  summary.totalEligible = accountContexts.length;
 
-  for (const acct of accounts) {
+  for (const acct of accountContexts) {
     const accountId = acct.Id;
     const accountName = acct.Name;
-    const perAccount = { accountId, accountName, status: "pending" };
+    const perAccount = {
+      accountId,
+      accountName,
+      status: "pending",
+      recipientCount: Array.isArray(acct.recipients) ? acct.recipients.length : 0,
+    };
 
     try {
+      const sf = options.sf || (dryRun ? null : await getInjectedOrLiveSf(options));
       if (!dryRun) {
-        const sf = options.sf || (await getInjectedOrLiveSf(options));
         if (await existsForWeek(sf, accountId, weekStart)) {
           perAccount.status = "skipped_existing";
           summary.skipped += 1;
@@ -68,7 +79,19 @@ async function runWeeklyDrafts(options = {}) {
         }
       }
 
-      const accountWeeklyData = buildAccountWeeklyData(acct, weekStart, weekEnd);
+      const historicalData =
+        acct.historicalData ||
+        (dryRun ? null : await fetchLatestHistoricalData(sf, accountId));
+      if (!dryRun && !historicalData) {
+        throw new Error(`No Historical_Data__c found for Account ${accountId}`);
+      }
+
+      const recentFeedback =
+        acct.recentFeedback ||
+        acct.recentCheckins ||
+        (dryRun ? [] : await fetchRecentClientFeedback(sf, accountId));
+
+      const accountWeeklyData = buildAccountWeeklyData(acct, weekStart, weekEnd, historicalData, recentFeedback);
 
       let generated;
       if (options.bedrockGenerate) {
@@ -90,9 +113,12 @@ async function runWeeklyDrafts(options = {}) {
         continue;
       }
 
-      const recipients = (options.recipients && options.recipients[accountId]) || [
-        process.env.GMAIL_REVIEW_RECIPIENT || process.env.GMAIL_SUBJECT,
-      ];
+      const recipients =
+        (options.recipients && options.recipients[accountId]) ||
+        (acct.recipients || []).map((r) => r.email).filter(Boolean);
+      if (recipients.length === 0) {
+        throw new Error(`No eligible Service Provider recipient email found for Account ${accountId}`);
+      }
       const fromAddress =
         process.env.GMAIL_FROM ||
         `Hope1Source Check-ins <${process.env.GMAIL_SUBJECT || "checkins@hopewithlove.org"}>`;
@@ -110,7 +136,6 @@ async function runWeeklyDrafts(options = {}) {
       perAccount.gmailDraftId = draft.draftId;
       perAccount.gmailThreadId = draft.threadId;
 
-      const sf = options.sf || (await getInjectedOrLiveSf(options));
       const history = await recordWeeklyHistory(sf, {
         accountId,
         weekStartIso: weekStart,
@@ -120,8 +145,15 @@ async function runWeeklyDrafts(options = {}) {
         bedrockModelId: generated.modelId,
         sourceDataHash: generated.sourceDataHash,
         markdownBody: generated.markdownBody,
+        historicalDataId: historicalData?.Id,
         status: "draft_created",
       });
+
+      await stampFeedbackEmailSent(
+        sf,
+        (acct.recipients || []).map((r) => r.contactId),
+        toIsoDate(now)
+      );
 
       perAccount.historicalDataId = history.recordId;
       perAccount.markdownContentDocumentId = history.contentDocumentId;
@@ -218,7 +250,7 @@ async function createGmailDraftLive({ generated, recipients, fromAddress }) {
   });
 }
 
-function buildAccountWeeklyData(acct, weekStart, weekEnd) {
+function buildAccountWeeklyData(acct, weekStart, weekEnd, historicalData = null, recentFeedback = []) {
   const passthrough = { ...acct };
   delete passthrough.attributes;
   return {
@@ -226,16 +258,32 @@ function buildAccountWeeklyData(acct, weekStart, weekEnd) {
     accountName: acct.Name,
     weekStart,
     weekEnd,
-    eligibilityFields: {
-      [ELIG_DEFAULTS.sendFeedback]: acct[ELIG_DEFAULTS.sendFeedback],
-      [ELIG_DEFAULTS.emailOptOut]: acct[ELIG_DEFAULTS.emailOptOut],
-      [ELIG_DEFAULTS.doNotContact]: acct[ELIG_DEFAULTS.doNotContact],
-      [ELIG_DEFAULTS.aiInsights]: acct[ELIG_DEFAULTS.aiInsights],
-    },
-    weeklyMetrics: acct.weeklyMetrics || passthrough.weeklyMetrics || {},
-    recentCheckins: acct.recentCheckins || passthrough.recentCheckins || [],
+    recipients: acct.recipients || [],
+    historicalDataId: historicalData?.Id || acct.historicalDataId || null,
+    historicalData,
+    weeklyMetrics: acct.weeklyMetrics || extractWeeklyMetrics(historicalData) || passthrough.weeklyMetrics || {},
+    recentCheckins: recentFeedback || acct.recentCheckins || passthrough.recentCheckins || [],
     notes: acct.notes || passthrough.notes || "",
   };
 }
 
-module.exports = { runWeeklyDrafts, buildAccountWeeklyData, buildStubEmail };
+function extractWeeklyMetrics(historicalData) {
+  if (!historicalData) return null;
+  return {
+    totalFeedback: historicalData.Total_Feedback__c,
+    feedbackLast7Days: historicalData.Feedback_Last_7_Days__c,
+    feedbackLast30Days: historicalData.Feedback_Last_30_Days__c,
+    avgRatingAllTime: historicalData.Avg_Rating_All_Time__c,
+    last7DaysRatingAvg: historicalData.Last_7_Days_Rating_Avg__c,
+    weeklyLast7DaysChange: historicalData.Weekly_Last_7_Days_Change__c,
+    weeklyLast7DaysRatingChange: historicalData.Weekly_Last_7_Days_Rating_Change__c,
+    total5StarReviews: historicalData.Total_of_5_Star_Reviews__c,
+    weekly5StarReviewChange: historicalData.Weekly_5_Star_Review_Change__c,
+  };
+}
+
+function toIsoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+module.exports = { runWeeklyDrafts, buildAccountWeeklyData, buildStubEmail, extractWeeklyMetrics };

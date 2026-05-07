@@ -8,7 +8,7 @@
 This repository contains two related capabilities:
 
 1. **Thunderbird MCP** -- a local extension + bridge that exposes 35 tools so any MCP-compatible AI assistant can read, compose, and organize Thunderbird mail.
-2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible accounts from Salesforce via JWT/SOQL, generates a polished mobile-friendly HTML email per account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hopewithlove.org`, and writes a `Historical_Data__c` record (with the email rendered as Markdown) back to Salesforce.
+2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible Service Provider Contacts from Salesforce via JWT/SOQL, groups them to one draft per Account, generates a polished mobile-friendly HTML email per Account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hopewithlove.org`, updates the same latest `Historical_Data__c` record, attaches the email as Markdown, and stamps each recipient Contact's `Last_Feedback_Email_Sent__c` when the draft is created.
 
 Jump to:
 
@@ -29,7 +29,7 @@ Tracked in Linear under [Weekly Check-in Email Drafts (V1)](https://linear.app/h
 |  weekly cron   |    |  handler.handler          |    |  Claude Sonnet  |    | drafts.create  |
 +----------------+    |                           |    |  4.5            |    | (gmail.compose)|
                       |  1. Salesforce JWT/SOQL   |    +-----------------+    +----------------+
-                      |  2. Eligibility filter    |          ^                       ^
+                      |  2. Contact eligibility    |          ^                       ^
                       |  3. Per-account loop      |----------+                       |
                       |  4. Bedrock generate      |                                  |
                       |  5. Gmail draft           |----------------------------------+
@@ -46,41 +46,80 @@ Tracked in Linear under [Weekly Check-in Email Drafts (V1)](https://linear.app/h
 Account isolation is the single most important property of this pipeline. Every step is keyed strictly by Salesforce `Account.Id`:
 
 - The Bedrock prompt receives data for **one** account at a time and is told never to reference any other account.
-- The Gmail draft is created with that account's data only.
-- The `Historical_Data__c` record is written under that exact `Account__c` parent.
+- The Gmail draft is created with that account's data only and addressed to the eligible Service Provider Contact(s) on that Account.
+- The latest `Historical_Data__c` record for that Account is updated in place and receives the Markdown attachment.
 - A failure on one account never blocks any other account in the same weekly run.
 
 ### Eligibility filter
 
-An Account is eligible only when **all four** Salesforce checkboxes match:
+Eligibility starts from **Contact**. Eligible Service Provider Contacts are grouped to **one Gmail draft per Account**. If an Account has multiple eligible Service Provider Contacts, the draft is addressed to all of them.
 
-| Field (default API name)       | Required value | Override env var               |
-|--------------------------------|----------------|--------------------------------|
-| `Send_Feedback_Emails__c`      | `TRUE`         | `SF_FIELD_SEND_FEEDBACK`       |
-| `Email__c` (email opt-out)     | `FALSE`        | `SF_FIELD_EMAIL_OPT_OUT`       |
-| `Do_Not_Contact__c`            | `FALSE`        | `SF_FIELD_DO_NOT_CONTACT`      |
-| `AI_Insights_Enabled__c`       | `TRUE`         | `SF_FIELD_AI_INSIGHTS`         |
+| Object  | Field / rule                         | Required value       | Override env var                    |
+|---------|--------------------------------------|----------------------|-------------------------------------|
+| Contact | `RecordType.DeveloperName`           | `Service_Provider`   | `SF_SERVICE_PROVIDER_RECORD_TYPE`   |
+| Account | `AI_Insights_Enabled__c`             | `TRUE`               | `SF_FIELD_ACCOUNT_AI_INSIGHTS`      |
+| Contact | `Send_Feedback_Emails__c`            | `TRUE`               | `SF_FIELD_SEND_FEEDBACK`            |
+| Contact | `npsp__Do_Not_Contact__c`            | `FALSE`              | `SF_FIELD_CONTACT_DO_NOT_CONTACT`   |
+| Contact | standard `Email`                     | not null             | `SF_FIELD_CONTACT_EMAIL`            |
 
-> **Confirm `Email__c`:** the eligibility says "Email == False" (opt-out semantics). If your org uses a different API name for the opt-out checkbox, set `SF_FIELD_EMAIL_OPT_OUT` to that name. Do not point this at the `Email` text field on Contact -- it must be a checkbox on Account.
+Reference SOQL:
+
+```sql
+SELECT Id, FirstName, LastName, Email,
+       AccountId, Account.Name, Account.AI_Insights_Enabled__c,
+       Send_Feedback_Emails__c, npsp__Do_Not_Contact__c,
+       RecordType.DeveloperName, Last_Feedback_Email_Sent__c
+FROM Contact
+WHERE RecordType.DeveloperName = 'Service_Provider'
+  AND Account.AI_Insights_Enabled__c = TRUE
+  AND Send_Feedback_Emails__c = TRUE
+  AND npsp__Do_Not_Contact__c = FALSE
+  AND Email != NULL
+```
 
 ### `Historical_Data__c` record
 
-Per (Account, week) the Lambda creates one record with:
+Per Account, the Lambda reads the **latest existing** `Historical_Data__c` record and uses it as the source for rollup metrics:
+
+- `Date_of_Generation__c`, `Account__c`
+- `Total_Feedback__c`, `Feedback_Last_7_Days__c`, `Feedback_Last_30_Days__c`
+- `Avg_Rating_All_Time__c`, `Last_7_Days_Rating_Avg__c`
+- `Weekly_Last_7_Days_Change__c`, `Weekly_Last_7_Days_Rating_Change__c`
+- `Total_of_5_Star_Reviews__c`, `Weekly_5_Star_Review_Change__c`
+
+After the Gmail draft is created, the same `Historical_Data__c` record is updated in place with:
 
 | Field (default)            | Type   | Description                                                |
 |----------------------------|--------|------------------------------------------------------------|
-| `Account__c`               | Lookup | Parent Account                                             |
-| `Week_Start__c`            | Date   | ISO Monday of the week                                     |
-| `Week_End__c`              | Date   | ISO Sunday of the week                                     |
+| `Week_Start__c`            | Date   | Optional ISO Monday of the week, only if configured        |
+| `Week_End__c`              | Date   | Optional ISO Sunday of the week, only if configured        |
 | `Gmail_Draft_Id__c`        | Text   | Gmail draft id (for the human reviewer)                    |
 | `Gmail_Thread_Id__c`       | Text   | Gmail thread id                                            |
 | `Bedrock_Model__c`         | Text   | Model id (e.g. `anthropic.claude-sonnet-4-5`)              |
 | `Source_Data_Hash__c`      | Text   | SHA-256 of the input metrics for idempotency / audit       |
 | `Status__c`                | Text   | `draft_created`, `sent`, `failed`, `skipped`               |
 
-The full email body is attached as a Salesforce **File (ContentVersion)** named `weekly-checkin-email-<weekStart>.md`. Override field API names via `SF_HD_*` envs.
+The full email body is attached to the same `Historical_Data__c` row as a Salesforce **File (ContentVersion)** named `weekly-checkin-email-<weekStart>.md`. Override field API names via `SF_HD_*` envs.
 
-**Idempotency:** before creating, the Lambda queries for an existing `Historical_Data__c` with `(Account__c = X, Week_Start__c = Y, Status__c IN ('draft_created','sent'))`. If found, it skips that account.
+**Idempotency:** before creating a draft, the Lambda queries for an existing `Historical_Data__c` with `(Account__c = X, Date_of_Generation__c = LAST_N_DAYS:7, Status__c IN ('draft_created','sent'))`. If found, it skips that account. Tune the window with `SF_HD_IDEMPOTENCY_WINDOW_DAYS`.
+
+### Recent client feedback source
+
+Individual quotes and sample ratings come from `Service_Provider_Feedback__c`, scoped by Account and client-submitted records:
+
+```sql
+SELECT Id, Account__c, Contact__c, Submission_Date__c,
+       Rating__c, Description__c,
+       How_Hopeful_Are_You__c, What_would_make_you_more_hopeful__c
+FROM Service_Provider_Feedback__c
+WHERE Account__c = '<AccountId>'
+  AND Contact__r.RecordType.DeveloperName = 'Client'
+  AND Submission_Date__c = LAST_N_DAYS:7
+ORDER BY Submission_Date__c DESC
+LIMIT 25
+```
+
+After draft creation, each eligible recipient Contact is stamped with `Last_Feedback_Email_Sent__c = TODAY`.
 
 ### File layout (V1)
 
@@ -90,7 +129,7 @@ pipeline/
   lib/
     salesforce-jwt.cjs                    # existing JWT auth (unchanged)
     sf-rest.cjs                           # SOQL + sObject create + File upload
-    eligibility.cjs                       # Account eligibility filter / SOQL builder
+    eligibility.cjs                       # Contact eligibility filter / one draft per Account grouping
     bedrock-email.cjs                     # Bedrock Sonnet 4.5 HTML email generator
     google-jwt.cjs                        # Google service-account JWT (DWD)
     gmail-draft.cjs                       # Gmail draft (drafts.create only - never send)
@@ -109,11 +148,12 @@ test/
 
 The existing JWT/SOQL Connected App is reused. Confirm the integration user has:
 
-- Read on `Account` and the four eligibility checkboxes
-- Create on `Historical_Data__c`, `ContentVersion`, `ContentDocumentLink`
+- Read on `Contact`, `Account`, `Historical_Data__c`, and `Service_Provider_Feedback__c`
+- Update on `Historical_Data__c` and `Contact.Last_Feedback_Email_Sent__c`
+- Create on `ContentVersion` / Salesforce Files
 - Profile/permission set granted on the Connected App
 
-If your eligibility or `Historical_Data__c` field API names differ from the defaults, set the `SF_FIELD_*` and `SF_HD_*` env vars (see `.env.example`).
+If your eligibility, feedback, or `Historical_Data__c` field API names differ from the defaults, set the `SF_FIELD_*`, `SF_FEEDBACK_*`, and `SF_HD_*` env vars (see `.env.example`).
 
 #### 2. Google Workspace for Nonprofits
 
@@ -198,7 +238,7 @@ Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic
 - **Drafts only.** Gmail scope is `gmail.compose`, not `gmail.send`.
 - **No PII in logs.** Log only `accountId`, status, model id, draft id, and hashes -- never email body or check-in payloads.
 - **Account isolation.** Bedrock prompt receives data for one account at a time; tests assert no cross-account bleed.
-- **Idempotency by `Source_Data_Hash__c`.** If the same week's input hasn't changed, you can detect re-runs.
+- **Idempotency by `Historical_Data__c` status + `Source_Data_Hash__c`.** If the same week's input hasn't changed, you can detect re-runs.
 - **Secrets in Secrets Manager.** `.env` only ever holds dev values; real values never enter the repo.
 - **Network egress.** Lambda only needs outbound HTTPS to Salesforce, Google, and Bedrock VPC endpoint (or public Bedrock endpoint).
 

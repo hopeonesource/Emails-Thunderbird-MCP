@@ -6,7 +6,12 @@ const path = require("path");
 
 const { runWeeklyDrafts } = require("../pipeline/lib/run-weekly-drafts.cjs");
 const { handler } = require("../pipeline/weekly-drafts-handler.js");
-const { isEligible, buildEligibilitySoql, fieldNames } = require("../pipeline/lib/eligibility.cjs");
+const {
+  isEligible,
+  buildEligibilitySoql,
+  fieldNames,
+  groupEligibleContactsByAccount,
+} = require("../pipeline/lib/eligibility.cjs");
 const { isoWeekWindow } = require("../pipeline/lib/week-window.cjs");
 const {
   parseModelOutput,
@@ -21,27 +26,54 @@ const FIXTURE_PATH = path.join(__dirname, "..", "fixtures", "weekly-eligible-acc
 describe("eligibility", () => {
   const f = fieldNames();
 
-  it("requires all four checkboxes to match", () => {
+  it("requires Service Provider Contact gates plus Account AI insights", () => {
     const ok = {
       [f.sendFeedback]: true,
-      [f.emailOptOut]: false,
-      [f.doNotContact]: false,
-      [f.aiInsights]: true,
+      [f.contactDoNotContact]: false,
+      [f.contactEmail]: "provider@example.org",
+      RecordType: { DeveloperName: "Service_Provider" },
+      Account: { [f.accountAiInsights]: true },
     };
     assert.equal(isEligible(ok), true);
     assert.equal(isEligible({ ...ok, [f.sendFeedback]: false }), false);
-    assert.equal(isEligible({ ...ok, [f.emailOptOut]: true }), false);
-    assert.equal(isEligible({ ...ok, [f.doNotContact]: true }), false);
-    assert.equal(isEligible({ ...ok, [f.aiInsights]: false }), false);
+    assert.equal(isEligible({ ...ok, [f.contactDoNotContact]: true }), false);
+    assert.equal(isEligible({ ...ok, [f.contactEmail]: null }), false);
+    assert.equal(isEligible({ ...ok, RecordType: { DeveloperName: "Client" } }), false);
+    assert.equal(isEligible({ ...ok, Account: { [f.accountAiInsights]: false } }), false);
   });
 
-  it("builds a SELECT...WHERE SOQL with all four conditions", () => {
+  it("builds a Contact eligibility SOQL with all gates", () => {
     const soql = buildEligibilitySoql();
-    assert.match(soql, /FROM Account/u);
+    assert.match(soql, /FROM Contact/u);
+    assert.match(soql, /RecordType\.DeveloperName = 'Service_Provider'/u);
+    assert.match(soql, new RegExp(`Account.${f.accountAiInsights} = TRUE`, "u"));
     assert.match(soql, new RegExp(`${f.sendFeedback} = TRUE`, "u"));
-    assert.match(soql, new RegExp(`${f.emailOptOut} = FALSE`, "u"));
-    assert.match(soql, new RegExp(`${f.doNotContact} = FALSE`, "u"));
-    assert.match(soql, new RegExp(`${f.aiInsights} = TRUE`, "u"));
+    assert.match(soql, new RegExp(`${f.contactDoNotContact} = FALSE`, "u"));
+    assert.match(soql, new RegExp(`${f.contactEmail} != NULL`, "u"));
+  });
+
+  it("groups multiple eligible contacts into one account draft context", () => {
+    const grouped = groupEligibleContactsByAccount([
+      {
+        Id: "003A",
+        FirstName: "A",
+        LastName: "One",
+        Email: "a@example.org",
+        AccountId: "001X",
+        Account: { Name: "Org X" },
+      },
+      {
+        Id: "003B",
+        FirstName: "B",
+        LastName: "Two",
+        Email: "b@example.org",
+        AccountId: "001X",
+        Account: { Name: "Org X" },
+      },
+    ]);
+    assert.equal(grouped.length, 1);
+    assert.equal(grouped[0].Id, "001X");
+    assert.equal(grouped[0].recipients.length, 2);
   });
 });
 
@@ -133,6 +165,7 @@ describe("orchestrator (mocked live path)", () => {
     const seenAccountsForBedrock = [];
     const seenAccountsForGmail = [];
     const seenAccountsForHistory = [];
+    const stampedContacts = [];
 
     const fakeSf = {
       instanceUrl: "https://example.my.salesforce.com",
@@ -146,8 +179,11 @@ describe("orchestrator (mocked live path)", () => {
       sf: fakeSf,
       existsForWeek: async () => false,
       recordWeeklyHistory: async (_sf, args) => {
-        seenAccountsForHistory.push(args.accountId);
+        seenAccountsForHistory.push({ accountId: args.accountId, historicalDataId: args.historicalDataId });
         return { recordId: `hd-${args.accountId}`, contentVersionId: null, contentDocumentId: null };
+      },
+      stampFeedbackEmailSent: async (_sf, contactIds, sentDateIso) => {
+        stampedContacts.push({ contactIds, sentDateIso });
       },
       bedrockGenerate: async (acct) => {
         seenAccountsForBedrock.push(acct.accountId);
@@ -178,7 +214,10 @@ describe("orchestrator (mocked live path)", () => {
     assert.equal(summary.failed, 0);
     assert.deepEqual(seenAccountsForBedrock.slice().sort(), fixtureIds.slice().sort());
     assert.deepEqual(seenAccountsForGmail.slice().sort(), fixtureIds.slice().sort());
-    assert.deepEqual(seenAccountsForHistory.slice().sort(), fixtureIds.slice().sort());
+    assert.deepEqual(seenAccountsForHistory.map((h) => h.accountId).sort(), fixtureIds.slice().sort());
+    assert.deepEqual(seenAccountsForHistory.map((h) => h.historicalDataId).sort(), ["a10FIXTUREHD01", "a10FIXTUREHD02"]);
+    assert.equal(stampedContacts.length, 2);
+    assert.equal(stampedContacts.flatMap((s) => s.contactIds).length, 3);
   });
 
   it("isolates failures (one account error does not block others)", async () => {
@@ -188,6 +227,7 @@ describe("orchestrator (mocked live path)", () => {
       nowIso: "2026-04-30T12:00:00Z",
       sf: { instanceUrl: "https://example.my.salesforce.com", accessToken: "fake" },
       existsForWeek: async () => false,
+      stampFeedbackEmailSent: async () => {},
       recordWeeklyHistory: async (_sf, args) => ({
         recordId: `hd-${args.accountId}`,
         contentVersionId: null,
@@ -220,6 +260,7 @@ describe("orchestrator (mocked live path)", () => {
       nowIso: "2026-04-30T12:00:00Z",
       sf: { instanceUrl: "https://example.my.salesforce.com", accessToken: "fake" },
       existsForWeek: async (_sf, accountId) => accountId === "001FIXTUREACCT01",
+      stampFeedbackEmailSent: async () => {},
       recordWeeklyHistory: async (_sf, args) => ({
         recordId: `hd-${args.accountId}`,
         contentVersionId: null,
