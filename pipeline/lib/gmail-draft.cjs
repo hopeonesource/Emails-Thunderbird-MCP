@@ -7,7 +7,7 @@ const { URL } = require("url");
  * Gmail API draft creation (NEVER send).
  *
  * Uses the access token returned by google-jwt.cjs which is scoped to
- * `gmail.compose` and impersonates GMAIL_SUBJECT (e.g. checkins@hopewithlove.org).
+ * `gmail.compose` and impersonates GMAIL_SUBJECT (e.g. checkins@hope1source.me).
  */
 
 const GMAIL_API_BASE = "https://gmail.googleapis.com";
@@ -105,7 +105,7 @@ function postJson(url, accessToken, bodyObj) {
  *
  * @param {object} params
  * @param {string} params.accessToken Google access token (scope: gmail.compose)
- * @param {string} params.from typically `Hope1Source Check-ins <checkins@hopewithlove.org>`
+ * @param {string} params.from typically `Hope1Source Check-ins <checkins@hope1source.me>`
  * @param {string|string[]} params.to recipient(s)
  * @param {string} params.subject email subject
  * @param {string} params.htmlBody HTML body

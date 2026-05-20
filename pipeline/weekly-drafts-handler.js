@@ -1,5 +1,6 @@
 "use strict";
 
+const { loadAwsSecretsIntoEnv } = require("./lib/aws-secrets-env.cjs");
 const { runWeeklyDrafts } = require("./lib/run-weekly-drafts.cjs");
 
 function envBool(name) {
@@ -22,11 +23,16 @@ function eventBool(event, key) {
  *
  * Event (optional):
  *   { dryRun: true, fixturePath: "/var/task/fixtures/weekly-eligible-accounts.json", nowIso: "2026-04-30T12:00:00Z" }
+ *   { fixtureDraftOnly: true, fixturePath: "/var/task/fixtures/weekly-eligible-accounts.json" }
  */
 exports.handler = async (event = {}) => {
+  await loadAwsSecretsIntoEnv();
   const dryRun = eventBool(event, "dryRun") || envBool("WEEKLY_DRAFTS_DRY_RUN");
+  const fixtureDraftOnly =
+    eventBool(event, "fixtureDraftOnly") || envBool("WEEKLY_DRAFTS_FIXTURE_DRAFT_ONLY");
   const summary = await runWeeklyDrafts({
     dryRun,
+    fixtureDraftOnly,
     fixturePath: event.fixturePath,
     nowIso: event.nowIso,
   });

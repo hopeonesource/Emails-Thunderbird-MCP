@@ -1,6 +1,7 @@
 # Build output (keep dist/thunderbird-mcp.xpi for easy install)
 dist/*.log
 dist/lambda-ingest.zip
+dist/lambda-weekly-drafts.zip
 dist/lambda-stage/
 extension/buildinfo.json
 

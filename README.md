@@ -8,7 +8,7 @@
 This repository contains two related capabilities:
 
 1. **Thunderbird MCP** -- a local extension + bridge that exposes 35 tools so any MCP-compatible AI assistant can read, compose, and organize Thunderbird mail.
-2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible Service Provider Contacts from Salesforce via JWT/SOQL, groups them to one draft per Account, generates a polished mobile-friendly HTML email per Account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hopewithlove.org`, updates the same latest `Historical_Data__c` record, attaches the email as Markdown, and stamps each recipient Contact's `Last_Feedback_Email_Sent__c` when the draft is created.
+2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible Service Provider Contacts from Salesforce via JWT/SOQL, groups them to one draft per Account, generates a polished mobile-friendly HTML email per Account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hope1source.me`, creates a new weekly `Historical_Data__c` record, and attaches the email as Markdown.
 
 Jump to:
 
@@ -45,9 +45,10 @@ Tracked in Linear under [Weekly Check-in Email Drafts (V1)](https://linear.app/h
 
 Account isolation is the single most important property of this pipeline. Every step is keyed strictly by Salesforce `Account.Id`:
 
-- The Bedrock prompt receives data for **one** account at a time and is told never to reference any other account.
-- The Gmail draft is created with that account's data only and addressed to the eligible Service Provider Contact(s) on that Account.
-- The latest `Historical_Data__c` record for that Account is updated in place and receives the Markdown attachment.
+- The Bedrock prompt receives approved check-in facts for **one** account at a time and is told never to reference any other account.
+- Recipient emails, Contact ids, Gmail draft ids, and raw Salesforce records are not sent to Bedrock.
+- The Gmail draft is created with that account's data only. For sandbox validation, set `GMAIL_REVIEW_RECIPIENT` to route drafts to approved reviewer inboxes instead of account contacts.
+- The latest `Historical_Data__c` record for that Account is read as source data only. A new weekly `Historical_Data__c` record is created for the draft writeback and receives the Markdown attachment.
 - A failure on one account never blocks any other account in the same weekly run.
 
 ### Eligibility filter
@@ -77,6 +78,18 @@ WHERE RecordType.DeveloperName = 'Service_Provider'
   AND Email != NULL
 ```
 
+When `GMAIL_REVIEW_RECIPIENT` is set, the pipeline still uses Contact eligibility to select Accounts, but Gmail drafts are addressed only to the configured reviewer address(es). This is the recommended setting for Bethel Cafe sandbox validation.
+
+Before any non-dry-run execution, set one of:
+
+```bash
+HOP43_ALLOWED_ACCOUNT_NAMES="Bethel Cafe"
+# or
+HOP43_ALLOWED_ACCOUNT_IDS="001..."
+```
+
+The pipeline refuses broad non-dry-run execution unless `HOP43_ALLOW_BROAD_RUN=true` is explicitly set. It also refuses to draft directly to Account contacts unless `HOP43_ALLOW_ACCOUNT_RECIPIENTS=true`; use `GMAIL_REVIEW_RECIPIENT` for sandbox validation.
+
 ### `Historical_Data__c` record
 
 Per Account, the Lambda reads the **latest existing** `Historical_Data__c` record and uses it as the source for rollup metrics:
@@ -87,21 +100,21 @@ Per Account, the Lambda reads the **latest existing** `Historical_Data__c` recor
 - `Weekly_Last_7_Days_Change__c`, `Weekly_Last_7_Days_Rating_Change__c`
 - `Total_of_5_Star_Reviews__c`, `Weekly_5_Star_Review_Change__c`
 
-After the Gmail draft is created, the same `Historical_Data__c` record is updated in place with:
+After the Gmail draft is created, a new weekly `Historical_Data__c` record is created with:
 
 | Field (default)            | Type   | Description                                                |
 |----------------------------|--------|------------------------------------------------------------|
 | `Week_Start__c`            | Date   | Optional ISO Monday of the week, only if configured        |
 | `Week_End__c`              | Date   | Optional ISO Sunday of the week, only if configured        |
-| `Gmail_Draft_Id__c`        | Text   | Gmail draft id (for the human reviewer)                    |
-| `Gmail_Thread_Id__c`       | Text   | Gmail thread id                                            |
-| `Bedrock_Model__c`         | Text   | Model id (e.g. `anthropic.claude-sonnet-4-5`)              |
-| `Source_Data_Hash__c`      | Text   | SHA-256 of the input metrics for idempotency / audit       |
-| `Status__c`                | Text   | `draft_created`, `sent`, `failed`, `skipped`               |
+| `Gmail_Draft_Id__c`        | Text   | Optional Gmail draft id, only if configured                |
+| `Gmail_Thread_Id__c`       | Text   | Optional Gmail thread id, only if configured               |
+| `Bedrock_Model__c`         | Text   | Optional model id, only if configured                      |
+| `Source_Data_Hash__c`      | Text   | Optional SHA-256 input hash, only if configured            |
+| `Status__c`                | Text   | Optional status, only if configured                        |
 
 The full email body is attached to the same `Historical_Data__c` row as a Salesforce **File (ContentVersion)** named `weekly-checkin-email-<weekStart>.md`. Override field API names via `SF_HD_*` envs.
 
-**Idempotency:** before creating a draft, the Lambda queries for an existing `Historical_Data__c` with `(Account__c = X, Date_of_Generation__c = LAST_N_DAYS:7, Status__c IN ('draft_created','sent'))`. If found, it skips that account. Tune the window with `SF_HD_IDEMPOTENCY_WINDOW_DAYS`.
+**Idempotency:** before creating a draft, the Lambda queries for an existing `Historical_Data__c` with `(Account__c = X, Date_of_Generation__c = LAST_N_DAYS:7)`. If `SF_HD_STATUS` is configured, it also filters to `draft_created`/`sent`. If found, it skips that account. Tune the window with `SF_HD_IDEMPOTENCY_WINDOW_DAYS`.
 
 ### Recent client feedback source
 
@@ -119,7 +132,7 @@ ORDER BY Submission_Date__c DESC
 LIMIT 25
 ```
 
-After draft creation, each eligible recipient Contact is stamped with `Last_Feedback_Email_Sent__c = TODAY`.
+Contact field stamping is disabled by default to avoid triggering existing dependencies. If the team explicitly approves it, set `SF_STAMP_FEEDBACK_EMAIL_SENT=true` to stamp each eligible recipient Contact with `Last_Feedback_Email_Sent__c = TODAY`.
 
 ### File layout (V1)
 
@@ -149,7 +162,8 @@ test/
 The existing JWT/SOQL Connected App is reused. Confirm the integration user has:
 
 - Read on `Contact`, `Account`, `Historical_Data__c`, and `Service_Provider_Feedback__c`
-- Update on `Historical_Data__c` and `Contact.Last_Feedback_Email_Sent__c`
+- Create on `Historical_Data__c`
+- Update on `Contact.Last_Feedback_Email_Sent__c` only if `SF_STAMP_FEEDBACK_EMAIL_SENT=true` is explicitly approved
 - Create on `ContentVersion` / Salesforce Files
 - Profile/permission set granted on the Connected App
 
@@ -160,21 +174,21 @@ If your eligibility, feedback, or `Historical_Data__c` field API names differ fr
 Create a Google Cloud project under the Workspace org and:
 
 1. **Enable** the Gmail API.
-2. Create a **service account**. Generate a JSON key.
+2. Create a **service account**. Prefer storing its credential material in AWS Secrets Manager for Lambda and teammate sandbox testing.
 3. In Workspace Admin (`admin.google.com`) **Security > Access and data control > API controls > Domain-wide delegation**, add the service account's client ID with the single scope:
    - `https://www.googleapis.com/auth/gmail.compose`
-4. Make sure `checkins@hopewithlove.org` is a real, monitored Workspace mailbox in `hopewithlove.org`.
+4. Make sure `checkins@hope1source.me` is a real, monitored Workspace mailbox in `hope1source.me`.
 5. Set in Lambda env:
    - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
    - `GOOGLE_PRIVATE_KEY` (PEM, escape newlines as `\n`) **or** `GOOGLE_PRIVATE_KEY_PATH`
-   - `GMAIL_SUBJECT=checkins@hopewithlove.org`
-   - `GMAIL_FROM=Hope1Source Check-ins <checkins@hopewithlove.org>`
+   - `GMAIL_SUBJECT=checkins@hope1source.me`
+   - `GMAIL_FROM=Hope1Source Check-ins <checkins@hope1source.me>`
 
 > **Why `gmail.compose` only?** This scope can read and write the user's drafts but **cannot send mail**. This is the smallest scope that lets the Lambda create drafts safely. A human still has to click Send in Gmail.
 
 #### 3. AWS Bedrock
 
-1. In the AWS console, **request access** to `anthropic.claude-sonnet-4-5` in the region you plan to use (e.g. `us-east-1`).
+1. In the AWS console, **request access** to `anthropic.claude-sonnet-4-5-20250929-v1:0` in the region you plan to use (e.g. `us-east-1`).
 2. Set `BEDROCK_MODEL_ID` if you want to override the default. Set `AWS_REGION` (already set in Lambda automatically).
 
 #### 4. AWS Lambda (V1)
@@ -183,7 +197,7 @@ Create a Google Cloud project under the Workspace org and:
 - Handler: `pipeline/weekly-drafts-handler.handler`
 - Memory: 512 MB (Bedrock invocation is light; bump to 1024 MB if you add attachments)
 - Timeout: 5 minutes
-- Trigger: EventBridge Scheduler, weekly (e.g. `cron(0 13 ? * MON *)` UTC = 09:00 ET Mondays)
+- Trigger for HOP-43 validation: manual invocation only. Do not create or change EventBridge settings until a separate reviewed scheduling issue approves it.
 
 **IAM role (least privilege):**
 
@@ -192,11 +206,11 @@ Create a Google Cloud project under the Workspace org and:
   "Version": "2012-10-17",
   "Statement": [
     { "Effect": "Allow", "Action": ["bedrock:InvokeModel"],
-      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5" },
+      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0" },
     { "Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
       "Resource": [
-        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/salesforce-*",
-        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/google-*"
+        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/hop43/salesforce-jwt-*",
+        "arn:aws:secretsmanager:us-east-1:<acct>:secret:hope1source/hop43/google-service-account-*"
       ] },
     { "Effect": "Allow", "Action": ["logs:CreateLogStream","logs:PutLogEvents"],
       "Resource": "arn:aws:logs:us-east-1:<acct>:log-group:/aws/lambda/hope1source-weekly-drafts:*" }
@@ -208,11 +222,53 @@ Create a Google Cloud project under the Workspace org and:
 
 | Secret                       | Storage                                  |
 |------------------------------|------------------------------------------|
-| Salesforce Connected App key | AWS Secrets Manager `hope1source/salesforce-jwt` |
-| Google service account key   | AWS Secrets Manager `hope1source/google-service-account` |
+| Salesforce Connected App key | AWS Secrets Manager `hope1source/hop43/salesforce-jwt` |
+| Google service account key   | AWS Secrets Manager `hope1source/hop43/google-service-account` |
 | Bedrock                      | IAM role only -- no static keys          |
 
-Loader convention: secrets are read at Lambda init and exposed via `process.env`. Keep the JSON shape simple: `{ "SF_PRIVATE_KEY": "...", "GOOGLE_PRIVATE_KEY": "..." }`. Never commit real values.
+Loader convention: when `HOP43_SECRET_SOURCE=aws`, secrets are read at Lambda init and exposed via `process.env`. Keep the JSON shape simple and never commit real values:
+
+```json
+{
+  "SF_CLIENT_ID": "...",
+  "SF_USERNAME": "apionly@hopewithlove.org",
+  "SF_LOGIN_URL": "https://login.salesforce.com",
+  "SF_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+}
+```
+
+```json
+{
+  "GOOGLE_SERVICE_ACCOUNT_EMAIL": "weekly-gmail-drafts@hos-clients-and-services.iam.gserviceaccount.com",
+  "GOOGLE_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+}
+```
+
+For teammate sandbox testing, store shared non-production credentials in AWS Secrets Manager and grant each teammate short-lived access through AWS SSO/profile `HOP42-Sandbox-Developer`. Then each teammate can create a local ignored `.env.local` without seeing secrets in chat or Linear:
+
+```bash
+aws sso login --profile HOP42-Sandbox-Developer
+npm run hop43:env:pull:keychain -- --profile HOP42-Sandbox-Developer
+source ./scripts/load-weekly-drafts-keychain-env.zsh
+npm run weekly-drafts:doctor:keychain
+```
+
+They can also inspect the approved secret names after AWS login at:
+
+```text
+AWS Console > Secrets Manager > Region us-east-1
+https://us-east-1.console.aws.amazon.com/secretsmanager/listsecrets?region=us-east-1
+```
+
+Fallback local env-file bootstrap:
+
+```bash
+npm run weekly-drafts:sync-env -- --profile HOP42-Sandbox-Developer
+```
+
+The sync script reads `hope1source/hop43/salesforce-jwt` and `hope1source/hop43/google-service-account`, writes `.env.local` with file mode `0600`, and never prints secret values. For Lambda, use Secrets Manager directly rather than copying keys into environment variables by hand.
+
+For the step-by-step safe validation sequence, see `docs/HOP-43-safe-validation-runbook.md`.
 
 ### Local development & dry-run
 
@@ -220,9 +276,21 @@ Loader convention: secrets are read at Lambda init and exposed via `process.env`
 npm install
 npm run test:weekly-drafts          # all unit tests, no network
 npm run weekly-drafts:dry           # full dry run with the bundled fixture
+npm run package:lambda              # writes dist/lambda-weekly-drafts.zip
 ```
 
 Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic stub HTML/Markdown body from the fixture so you can iterate on the orchestrator and downstream wiring without credentials.
+
+After AWS/Gmail credentials are configured, use fixture-draft-only mode before Salesforce writes:
+
+```json
+{
+  "fixtureDraftOnly": true,
+  "fixturePath": "/var/task/fixtures/weekly-eligible-accounts.json"
+}
+```
+
+That path reads packaged fixture data, calls Bedrock and Gmail, and skips Salesforce reads/writes.
 
 ### Operations
 
@@ -237,9 +305,11 @@ Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic
 - **Least-privilege IAM** as above; scope Bedrock to the specific model ARN.
 - **Drafts only.** Gmail scope is `gmail.compose`, not `gmail.send`.
 - **No PII in logs.** Log only `accountId`, status, model id, draft id, and hashes -- never email body or check-in payloads.
-- **Account isolation.** Bedrock prompt receives data for one account at a time; tests assert no cross-account bleed.
+- **Account isolation.** Bedrock prompt receives sanitized data for one account at a time; tests assert no cross-account bleed and no recipient emails or raw Salesforce records in the model payload.
 - **Idempotency by `Historical_Data__c` status + `Source_Data_Hash__c`.** If the same week's input hasn't changed, you can detect re-runs.
 - **Secrets in Secrets Manager.** `.env` only ever holds dev values; real values never enter the repo.
+- **No default Contact writes.** Contact stamping is opt-in through `SF_STAMP_FEEDBACK_EMAIL_SENT=true`.
+- **Allowlist required.** Non-dry-run execution requires an Account id/name allowlist unless a reviewed broad run is explicitly enabled.
 - **Network egress.** Lambda only needs outbound HTTPS to Salesforce, Google, and Bedrock VPC endpoint (or public Bedrock endpoint).
 
 ### Troubleshooting

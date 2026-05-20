@@ -22,6 +22,7 @@ const { isoWeekWindow } = require("./week-window.cjs");
  *
  * options:
  *   dryRun         (bool) - skip Bedrock/Gmail/Salesforce-write side effects, return planned actions
+ *   fixtureDraftOnly (bool) - use fixture data, call Bedrock/Gmail, skip Salesforce reads/writes
  *   fixturePath    (string) - dry-run account/recipient fixture
  *   nowIso         (string) - override current time (for tests)
  *   bedrockGenerate(account) -> { subject, htmlBody, markdownBody, modelId, sourceDataHash }
@@ -35,6 +36,7 @@ const { isoWeekWindow } = require("./week-window.cjs");
  */
 async function runWeeklyDrafts(options = {}) {
   const dryRun = options.dryRun === true;
+  const fixtureDraftOnly = options.fixtureDraftOnly === true;
   const now = options.nowIso ? new Date(options.nowIso) : new Date();
   const { weekStart, weekEnd } = isoWeekWindow(now);
   const existsForWeek = options.existsForWeek || existsForWeekDefault;
@@ -48,6 +50,7 @@ async function runWeeklyDrafts(options = {}) {
     weekStart,
     weekEnd,
     dryRun,
+    fixtureDraftOnly,
     totalEligible: 0,
     draftsCreated: 0,
     skipped: 0,
@@ -55,7 +58,10 @@ async function runWeeklyDrafts(options = {}) {
     perAccount: [],
   };
 
-  const accountContexts = await loadEligibleAccounts(options, dryRun);
+  const accountContexts = applyAccountAllowlist(
+    await loadEligibleAccounts(options, dryRun || fixtureDraftOnly),
+    options
+  );
   summary.totalEligible = accountContexts.length;
 
   for (const acct of accountContexts) {
@@ -69,8 +75,8 @@ async function runWeeklyDrafts(options = {}) {
     };
 
     try {
-      const sf = options.sf || (dryRun ? null : await getInjectedOrLiveSf(options));
-      if (!dryRun) {
+      const sf = options.sf || (dryRun || fixtureDraftOnly ? null : await getInjectedOrLiveSf(options));
+      if (!dryRun && !fixtureDraftOnly) {
         if (await existsForWeek(sf, accountId, weekStart)) {
           perAccount.status = "skipped_existing";
           summary.skipped += 1;
@@ -81,15 +87,15 @@ async function runWeeklyDrafts(options = {}) {
 
       const historicalData =
         acct.historicalData ||
-        (dryRun ? null : await fetchLatestHistoricalData(sf, accountId));
-      if (!dryRun && !historicalData) {
+        (dryRun || fixtureDraftOnly ? null : await fetchLatestHistoricalData(sf, accountId));
+      if (!dryRun && !fixtureDraftOnly && !historicalData) {
         throw new Error(`No Historical_Data__c found for Account ${accountId}`);
       }
 
       const recentFeedback =
         acct.recentFeedback ||
         acct.recentCheckins ||
-        (dryRun ? [] : await fetchRecentClientFeedback(sf, accountId));
+        (dryRun || fixtureDraftOnly ? [] : await fetchRecentClientFeedback(sf, accountId));
 
       const accountWeeklyData = buildAccountWeeklyData(acct, weekStart, weekEnd, historicalData, recentFeedback);
 
@@ -113,15 +119,13 @@ async function runWeeklyDrafts(options = {}) {
         continue;
       }
 
-      const recipients =
-        (options.recipients && options.recipients[accountId]) ||
-        (acct.recipients || []).map((r) => r.email).filter(Boolean);
+      const recipients = resolveDraftRecipients(acct, accountId, options);
       if (recipients.length === 0) {
         throw new Error(`No eligible Service Provider recipient email found for Account ${accountId}`);
       }
       const fromAddress =
         process.env.GMAIL_FROM ||
-        `Hope1Source Check-ins <${process.env.GMAIL_SUBJECT || "checkins@hopewithlove.org"}>`;
+        `Hope1Source Check-ins <${process.env.GMAIL_SUBJECT || "checkins@hope1source.me"}>`;
 
       const draft = options.gmailCreateDraft
         ? await options.gmailCreateDraft({
@@ -136,6 +140,13 @@ async function runWeeklyDrafts(options = {}) {
       perAccount.gmailDraftId = draft.draftId;
       perAccount.gmailThreadId = draft.threadId;
 
+      if (fixtureDraftOnly) {
+        perAccount.status = "fixture_draft_created";
+        summary.draftsCreated += 1;
+        summary.perAccount.push(perAccount);
+        continue;
+      }
+
       const history = await recordWeeklyHistory(sf, {
         accountId,
         weekStartIso: weekStart,
@@ -145,15 +156,16 @@ async function runWeeklyDrafts(options = {}) {
         bedrockModelId: generated.modelId,
         sourceDataHash: generated.sourceDataHash,
         markdownBody: generated.markdownBody,
-        historicalDataId: historicalData?.Id,
         status: "draft_created",
       });
 
-      await stampFeedbackEmailSent(
-        sf,
-        (acct.recipients || []).map((r) => r.contactId),
-        toIsoDate(now)
-      );
+      if (process.env.SF_STAMP_FEEDBACK_EMAIL_SENT === "true") {
+        await stampFeedbackEmailSent(
+          sf,
+          (acct.recipients || []).map((r) => r.contactId),
+          toIsoDate(now)
+        );
+      }
 
       perAccount.historicalDataId = history.recordId;
       perAccount.markdownContentDocumentId = history.contentDocumentId;
@@ -191,6 +203,32 @@ async function loadEligibleAccounts(options, dryRun) {
 
   const sf = options.sf || (await getInjectedOrLiveSf(options));
   return fetchEligibleAccounts(sf);
+}
+
+function applyAccountAllowlist(accountContexts, options = {}) {
+  if (!Array.isArray(accountContexts)) return [];
+  const idAllowlist = parseCsv(options.allowedAccountIds || process.env.HOP43_ALLOWED_ACCOUNT_IDS);
+  const nameAllowlist = parseCsv(options.allowedAccountNames || process.env.HOP43_ALLOWED_ACCOUNT_NAMES)
+    .map((name) => name.toLowerCase());
+  const allowBroad = /^(1|true|yes)$/i.test(String(options.allowBroadRun || process.env.HOP43_ALLOW_BROAD_RUN || ""));
+
+  if (idAllowlist.length === 0 && nameAllowlist.length === 0) {
+    if (allowBroad || options.dryRun === true) return accountContexts;
+    throw new Error("Set HOP43_ALLOWED_ACCOUNT_IDS or HOP43_ALLOWED_ACCOUNT_NAMES before non-dry-run execution");
+  }
+
+  return accountContexts.filter((acct) => {
+    const id = String(acct.Id || acct.accountId || "");
+    const name = String(acct.Name || acct.accountName || "").toLowerCase();
+    return idAllowlist.includes(id) || nameAllowlist.includes(name);
+  });
+}
+
+function parseCsv(value) {
+  return String(value || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 function buildStubEmail(accountWeeklyData) {
@@ -250,20 +288,43 @@ async function createGmailDraftLive({ generated, recipients, fromAddress }) {
   });
 }
 
+function resolveDraftRecipients(acct, accountId, options = {}) {
+  if (options.recipients && options.recipients[accountId]) return options.recipients[accountId];
+  if (process.env.GMAIL_REVIEW_RECIPIENT) {
+    return process.env.GMAIL_REVIEW_RECIPIENT.split(",")
+      .map((email) => email.trim())
+      .filter(Boolean);
+  }
+  if (!/^(1|true|yes)$/i.test(String(options.allowAccountRecipients || process.env.HOP43_ALLOW_ACCOUNT_RECIPIENTS || ""))) {
+    throw new Error("Set GMAIL_REVIEW_RECIPIENT before creating drafts, or explicitly set HOP43_ALLOW_ACCOUNT_RECIPIENTS=true");
+  }
+  return (acct.recipients || []).map((r) => r.email).filter(Boolean);
+}
+
 function buildAccountWeeklyData(acct, weekStart, weekEnd, historicalData = null, recentFeedback = []) {
   const passthrough = { ...acct };
   delete passthrough.attributes;
+  const checkins = recentFeedback || acct.recentCheckins || passthrough.recentCheckins || [];
   return {
     accountId: acct.Id,
     accountName: acct.Name,
     weekStart,
     weekEnd,
-    recipients: acct.recipients || [],
+    serviceProviderRecipientCount: Array.isArray(acct.recipients) ? acct.recipients.length : 0,
     historicalDataId: historicalData?.Id || acct.historicalDataId || null,
-    historicalData,
     weeklyMetrics: acct.weeklyMetrics || extractWeeklyMetrics(historicalData) || passthrough.weeklyMetrics || {},
-    recentCheckins: recentFeedback || acct.recentCheckins || passthrough.recentCheckins || [],
-    notes: acct.notes || passthrough.notes || "",
+    recentCheckins: checkins.map(sanitizeCheckinForBedrock),
+  };
+}
+
+function sanitizeCheckinForBedrock(record) {
+  if (!record || typeof record !== "object") return {};
+  return {
+    submittedOn: record.Submission_Date__c || record.submittedOn || null,
+    rating: record.Rating__c || record.rating || null,
+    description: record.Description__c || record.description || "",
+    hopefulScore: record.How_Hopeful_Are_You__c || record.hopefulScore || null,
+    moreHopeful: record.What_would_make_you_more_hopeful__c || record.moreHopeful || "",
   };
 }
 
@@ -286,4 +347,12 @@ function toIsoDate(d) {
   return d.toISOString().slice(0, 10);
 }
 
-module.exports = { runWeeklyDrafts, buildAccountWeeklyData, buildStubEmail, extractWeeklyMetrics };
+module.exports = {
+  runWeeklyDrafts,
+  buildAccountWeeklyData,
+  buildStubEmail,
+  extractWeeklyMetrics,
+  sanitizeCheckinForBedrock,
+  resolveDraftRecipients,
+  applyAccountAllowlist,
+};
