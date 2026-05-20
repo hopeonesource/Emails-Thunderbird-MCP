@@ -4,7 +4,12 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 
-const { runWeeklyDrafts } = require("../pipeline/lib/run-weekly-drafts.cjs");
+const {
+  runWeeklyDrafts,
+  buildAccountWeeklyData,
+  resolveDraftRecipients,
+  applyAccountAllowlist,
+} = require("../pipeline/lib/run-weekly-drafts.cjs");
 const { handler } = require("../pipeline/weekly-drafts-handler.js");
 const {
   isEligible,
@@ -19,7 +24,12 @@ const {
   buildUserMessage,
   generateWeeklyEmail,
 } = require("../pipeline/lib/bedrock-email.cjs");
+const {
+  secretIdsFromEnv,
+  loadAwsSecretsIntoEnv,
+} = require("../pipeline/lib/aws-secrets-env.cjs");
 const { buildMime, base64UrlEncode, stripHtml } = require("../pipeline/lib/gmail-draft.cjs");
+const { fieldNames: historicalFieldNames } = require("../pipeline/lib/historical-data.cjs");
 
 const FIXTURE_PATH = path.join(__dirname, "..", "fixtures", "weekly-eligible-accounts.json");
 
@@ -97,6 +107,40 @@ describe("bedrock-email helpers", () => {
     assert.match(msg, /accountId/u);
   });
 
+  it("does not pass recipient emails or raw Salesforce records to Bedrock", () => {
+    const data = buildAccountWeeklyData(
+      {
+        Id: "001X",
+        Name: "Bethel Cafe",
+        recipients: [{ contactId: "003X", email: "provider@example.org" }],
+      },
+      "2026-05-18",
+      "2026-05-24",
+      {
+        Id: "a10X",
+        Account__c: "001X",
+        Gmail_Draft_Id__c: "draft-old",
+        Total_Feedback__c: 7,
+      },
+      [
+        {
+          Id: "a20X",
+          Contact__c: "003CLIENT",
+          Submission_Date__c: "2026-05-19",
+          Rating__c: 5,
+          Description__c: "Helpful follow-up",
+        },
+      ]
+    );
+    const serialized = JSON.stringify(data);
+    assert.equal(data.accountId, "001X");
+    assert.equal(data.serviceProviderRecipientCount, 1);
+    assert.doesNotMatch(serialized, /provider@example\.org/u);
+    assert.doesNotMatch(serialized, /003CLIENT/u);
+    assert.doesNotMatch(serialized, /draft-old/u);
+    assert.match(serialized, /Helpful follow-up/u);
+  });
+
   it("parses fenced JSON output", () => {
     const out = parseModelOutput("```json\n{\"subject\":\"s\",\"html\":\"<p>h</p>\",\"markdown\":\"# m\"}\n```");
     assert.equal(out.subject, "s");
@@ -117,8 +161,8 @@ describe("bedrock-email helpers", () => {
 describe("gmail-draft helpers", () => {
   it("builds multipart MIME with subject and bodies", () => {
     const mime = buildMime({
-      from: "checkins@hopewithlove.org",
-      to: "v@hopewithlove.org",
+      from: "checkins@hope1source.me",
+      to: "reviewer@example.org",
       subject: "Test",
       htmlBody: "<p>Hi</p>",
     });
@@ -161,11 +205,106 @@ describe("orchestrator (dry run)", () => {
 });
 
 describe("orchestrator (mocked live path)", () => {
+  it("requires an account allowlist before non-dry-run execution", async () => {
+    const previous = process.env.HOP43_ALLOW_BROAD_RUN;
+    delete process.env.HOP43_ALLOW_BROAD_RUN;
+    try {
+      await assert.rejects(
+        runWeeklyDrafts({
+          dryRun: false,
+          fixturePath: FIXTURE_PATH,
+          sf: { instanceUrl: "https://example.my.salesforce.com", accessToken: "fake" },
+        }),
+        /HOP43_ALLOWED_ACCOUNT/u
+      );
+    } finally {
+      if (previous === undefined) delete process.env.HOP43_ALLOW_BROAD_RUN;
+      else process.env.HOP43_ALLOW_BROAD_RUN = previous;
+    }
+  });
+
+  it("filters to Bethel Cafe by allowlisted account name", () => {
+    const filtered = applyAccountAllowlist(
+      [
+        { Id: "001A", Name: "Bethel Cafe" },
+        { Id: "001B", Name: "Other Org" },
+      ],
+      { allowedAccountNames: "Bethel Cafe" }
+    );
+    assert.deepEqual(filtered.map((a) => a.Id), ["001A"]);
+  });
+
+  it("routes drafts to GMAIL_REVIEW_RECIPIENT when configured", () => {
+    const previous = process.env.GMAIL_REVIEW_RECIPIENT;
+    process.env.GMAIL_REVIEW_RECIPIENT = "reviewer@example.org, reviewer2@example.org";
+    try {
+      assert.deepEqual(
+        resolveDraftRecipients(
+          { recipients: [{ email: "real.provider@example.org" }] },
+          "001X",
+          {}
+        ),
+        ["reviewer@example.org", "reviewer2@example.org"]
+      );
+    } finally {
+      if (previous === undefined) delete process.env.GMAIL_REVIEW_RECIPIENT;
+      else process.env.GMAIL_REVIEW_RECIPIENT = previous;
+    }
+  });
+
+  it("requires reviewer routing before account-recipient drafting", () => {
+    const previous = process.env.GMAIL_REVIEW_RECIPIENT;
+    delete process.env.GMAIL_REVIEW_RECIPIENT;
+    try {
+      assert.throws(
+        () => resolveDraftRecipients({ recipients: [{ email: "real.provider@example.org" }] }, "001X", {}),
+        /GMAIL_REVIEW_RECIPIENT/u
+      );
+    } finally {
+      if (previous === undefined) delete process.env.GMAIL_REVIEW_RECIPIENT;
+      else process.env.GMAIL_REVIEW_RECIPIENT = previous;
+    }
+  });
+
+  it("fixtureDraftOnly creates drafts without Salesforce writeback", async () => {
+    const previousReviewRecipient = process.env.GMAIL_REVIEW_RECIPIENT;
+    process.env.GMAIL_REVIEW_RECIPIENT = "reviewer@example.org";
+    try {
+      const summary = await runWeeklyDrafts({
+        fixtureDraftOnly: true,
+        fixturePath: FIXTURE_PATH,
+        allowedAccountIds: "001FIXTUREACCT01",
+        nowIso: "2026-04-30T12:00:00Z",
+        recordWeeklyHistory: async () => {
+          throw new Error("Salesforce writeback should be skipped in fixtureDraftOnly");
+        },
+        bedrockGenerate: async (acct) => ({
+          subject: `Weekly: ${acct.accountName}`,
+          htmlBody: `<p>${acct.accountName}</p>`,
+          markdownBody: `# ${acct.accountName}`,
+          modelId: "anthropic.claude-sonnet-4-5",
+          sourceDataHash: `hash-${acct.accountId}`,
+        }),
+        gmailCreateDraft: async ({ accountId, to }) => {
+          assert.equal(accountId, "001FIXTUREACCT01");
+          assert.deepEqual(to, ["reviewer@example.org"]);
+          return { draftId: `draft-${accountId}`, threadId: `thread-${accountId}` };
+        },
+      });
+      assert.equal(summary.totalEligible, 1);
+      assert.equal(summary.draftsCreated, 1);
+      assert.equal(summary.perAccount[0].status, "fixture_draft_created");
+      assert.equal(summary.perAccount[0].historicalDataId, undefined);
+    } finally {
+      if (previousReviewRecipient === undefined) delete process.env.GMAIL_REVIEW_RECIPIENT;
+      else process.env.GMAIL_REVIEW_RECIPIENT = previousReviewRecipient;
+    }
+  });
+
   it("creates draft + history per account, isolating by accountId", async () => {
     const seenAccountsForBedrock = [];
     const seenAccountsForGmail = [];
     const seenAccountsForHistory = [];
-    const stampedContacts = [];
 
     const fakeSf = {
       instanceUrl: "https://example.my.salesforce.com",
@@ -175,6 +314,8 @@ describe("orchestrator (mocked live path)", () => {
     const summary = await runWeeklyDrafts({
       dryRun: false,
       fixturePath: FIXTURE_PATH,
+      allowedAccountIds: "001FIXTUREACCT01,001FIXTUREACCT02",
+      allowAccountRecipients: true,
       nowIso: "2026-04-30T12:00:00Z",
       sf: fakeSf,
       existsForWeek: async () => false,
@@ -182,8 +323,8 @@ describe("orchestrator (mocked live path)", () => {
         seenAccountsForHistory.push({ accountId: args.accountId, historicalDataId: args.historicalDataId });
         return { recordId: `hd-${args.accountId}`, contentVersionId: null, contentDocumentId: null };
       },
-      stampFeedbackEmailSent: async (_sf, contactIds, sentDateIso) => {
-        stampedContacts.push({ contactIds, sentDateIso });
+      stampFeedbackEmailSent: async () => {
+        throw new Error("Contact stamping should be opt-in only");
       },
       bedrockGenerate: async (acct) => {
         seenAccountsForBedrock.push(acct.accountId);
@@ -215,15 +356,15 @@ describe("orchestrator (mocked live path)", () => {
     assert.deepEqual(seenAccountsForBedrock.slice().sort(), fixtureIds.slice().sort());
     assert.deepEqual(seenAccountsForGmail.slice().sort(), fixtureIds.slice().sort());
     assert.deepEqual(seenAccountsForHistory.map((h) => h.accountId).sort(), fixtureIds.slice().sort());
-    assert.deepEqual(seenAccountsForHistory.map((h) => h.historicalDataId).sort(), ["a10FIXTUREHD01", "a10FIXTUREHD02"]);
-    assert.equal(stampedContacts.length, 2);
-    assert.equal(stampedContacts.flatMap((s) => s.contactIds).length, 3);
+    assert.deepEqual(seenAccountsForHistory.map((h) => h.historicalDataId), [undefined, undefined]);
   });
 
   it("isolates failures (one account error does not block others)", async () => {
     const summary = await runWeeklyDrafts({
       dryRun: false,
       fixturePath: FIXTURE_PATH,
+      allowedAccountIds: "001FIXTUREACCT01,001FIXTUREACCT02",
+      allowAccountRecipients: true,
       nowIso: "2026-04-30T12:00:00Z",
       sf: { instanceUrl: "https://example.my.salesforce.com", accessToken: "fake" },
       existsForWeek: async () => false,
@@ -257,6 +398,8 @@ describe("orchestrator (mocked live path)", () => {
     const summary = await runWeeklyDrafts({
       dryRun: false,
       fixturePath: FIXTURE_PATH,
+      allowedAccountIds: "001FIXTUREACCT01,001FIXTUREACCT02",
+      allowAccountRecipients: true,
       nowIso: "2026-04-30T12:00:00Z",
       sf: { instanceUrl: "https://example.my.salesforce.com", accessToken: "fake" },
       existsForWeek: async (_sf, accountId) => accountId === "001FIXTUREACCT01",
@@ -284,6 +427,17 @@ describe("orchestrator (mocked live path)", () => {
   });
 });
 
+describe("Historical_Data__c writeback", () => {
+  it("does not require optional draft metadata fields by default", () => {
+    const f = historicalFieldNames();
+    assert.equal(f.draftId, "");
+    assert.equal(f.threadId, "");
+    assert.equal(f.model, "");
+    assert.equal(f.hash, "");
+    assert.equal(f.status, "");
+  });
+});
+
 describe("lambda handler (dry run)", () => {
   it("returns ok=true with per-account dry_run results", async () => {
     process.env.WEEKLY_DRAFTS_FIXTURE_PATH = FIXTURE_PATH;
@@ -295,5 +449,50 @@ describe("lambda handler (dry run)", () => {
     assert.equal(out.dryRun, true);
     assert.equal(out.totalEligible, 2);
     assert.equal(out.weekStart, "2026-04-27");
+  });
+});
+
+describe("AWS Secrets Manager env loader", () => {
+  it("uses HOP-43 secret names by default", () => {
+    assert.deepEqual(secretIdsFromEnv({}), [
+      "hope1source/hop43/salesforce-jwt",
+      "hope1source/hop43/google-service-account",
+    ]);
+  });
+
+  it("loads JSON secret values into the provided env without printing them", async () => {
+    class FakeCommand {
+      constructor(input) {
+        this.input = input;
+      }
+    }
+    const calls = [];
+    const client = {
+      async send(cmd) {
+        calls.push(cmd.input.SecretId);
+        return {
+          SecretString: JSON.stringify(
+            cmd.input.SecretId.includes("salesforce")
+              ? { SF_CLIENT_ID: "client", SF_PRIVATE_KEY: "sf-key" }
+              : { GOOGLE_SERVICE_ACCOUNT_EMAIL: "svc@example.org", GOOGLE_PRIVATE_KEY: "google-key" }
+          ),
+        };
+      },
+    };
+    const env = { HOP43_SECRET_SOURCE: "aws", AWS_REGION: "us-east-1" };
+
+    const result = await loadAwsSecretsIntoEnv({
+      env,
+      client,
+      GetSecretValueCommandCtor: FakeCommand,
+    });
+
+    assert.equal(result.loaded, true);
+    assert.deepEqual(calls, [
+      "hope1source/hop43/salesforce-jwt",
+      "hope1source/hop43/google-service-account",
+    ]);
+    assert.equal(env.SF_CLIENT_ID, "client");
+    assert.equal(env.GOOGLE_SERVICE_ACCOUNT_EMAIL, "svc@example.org");
   });
 });

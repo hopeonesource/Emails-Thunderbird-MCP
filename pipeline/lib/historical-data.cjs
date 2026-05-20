@@ -13,8 +13,9 @@ const { querySoql, createSObject, updateSObject, uploadFileToRecord } = require(
  *   Source_Data_Hash__c        Text
  *   Status__c                  Picklist (draft_created, sent, failed, skipped)
  *
- * The latest Historical_Data__c is also the source for weekly rollup metrics
- * and is updated in-place after the Gmail draft is created.
+ * The latest Historical_Data__c can be read as the source for weekly rollup
+ * metrics. HOP-43 creates a new per-Account/week writeback record after the
+ * Gmail draft is created; it does not update the source rollup record.
  */
 
 const FIELD_DEFAULTS = {
@@ -23,11 +24,11 @@ const FIELD_DEFAULTS = {
   dateOfGeneration: "Date_of_Generation__c",
   weekStart: "",
   weekEnd: "",
-  draftId: "Gmail_Draft_Id__c",
-  threadId: "Gmail_Thread_Id__c",
-  model: "Bedrock_Model__c",
-  hash: "Source_Data_Hash__c",
-  status: "Status__c",
+  draftId: "",
+  threadId: "",
+  model: "",
+  hash: "",
+  status: "",
   feedbackObject: "Service_Provider_Feedback__c",
   feedbackAccount: "Account__c",
   feedbackContact: "Contact__c",
@@ -69,17 +70,20 @@ function escapeSoqlString(value) {
 }
 
 /**
- * Returns true if a Historical_Data__c already exists for (accountId, weekStart)
- * with a non-failed status. Used for idempotency in the orchestrator.
+ * Returns true if a Historical_Data__c already exists for (accountId, weekStart).
+ * If a status field is configured, only draft_created/sent records count.
  */
 async function existsForWeek({ instanceUrl, accessToken }, accountId, weekStartIso) {
   const f = fieldNames();
   const days = Number(process.env.SF_HD_IDEMPOTENCY_WINDOW_DAYS || 7);
+  const selectFields = ["Id"];
+  if (f.status) selectFields.push(f.status);
   const soql =
-    `SELECT Id, ${f.status} FROM ${f.object} ` +
+    `SELECT ${selectFields.join(", ")} FROM ${f.object} ` +
     `WHERE ${f.account} = '${escapeSoqlString(accountId)}' ` +
     `AND ${f.dateOfGeneration} = LAST_N_DAYS:${days} ` +
-    `AND ${f.status} IN ('draft_created', 'sent') LIMIT 1`;
+    `${f.status ? `AND ${f.status} IN ('draft_created', 'sent') ` : ""}` +
+    `LIMIT 1`;
   const result = await querySoql(instanceUrl, accessToken, soql);
   return Array.isArray(result.records) && result.records.length > 0;
 }
@@ -99,12 +103,10 @@ async function fetchLatestHistoricalData({ instanceUrl, accessToken }, accountId
     "Weekly_Last_7_Days_Rating_Change__c",
     "Total_of_5_Star_Reviews__c",
     "Weekly_5_Star_Review_Change__c",
-    f.draftId,
-    f.threadId,
-    f.model,
-    f.hash,
-    f.status,
   ];
+  for (const optionalField of [f.draftId, f.threadId, f.model, f.hash, f.status]) {
+    if (optionalField) metricFields.push(optionalField);
+  }
   const soql =
     `SELECT ${metricFields.join(", ")} FROM ${f.object} ` +
     `WHERE ${f.account} = '${escapeSoqlString(accountId)}' ` +
@@ -143,7 +145,6 @@ async function recordWeeklyHistory(
     bedrockModelId,
     sourceDataHash,
     markdownBody,
-    historicalDataId,
     status = "draft_created",
   }
 ) {
@@ -151,18 +152,17 @@ async function recordWeeklyHistory(
   const f = fieldNames();
   const body = {
     [f.account]: accountId,
-    [f.draftId]: draftId,
-    [f.threadId]: threadId,
-    [f.model]: bedrockModelId,
-    [f.hash]: sourceDataHash,
-    [f.status]: status,
+    [f.dateOfGeneration]: weekEndIso || weekStartIso,
   };
+  if (f.draftId) body[f.draftId] = draftId;
+  if (f.threadId) body[f.threadId] = threadId;
+  if (f.model) body[f.model] = bedrockModelId;
+  if (f.hash) body[f.hash] = sourceDataHash;
+  if (f.status) body[f.status] = status;
   if (f.weekStart) body[f.weekStart] = weekStartIso;
   if (f.weekEnd) body[f.weekEnd] = weekEndIso;
 
-  const created = historicalDataId
-    ? await updateExistingHistoricalData(instanceUrl, accessToken, f.object, historicalDataId, body)
-    : await createSObject(instanceUrl, accessToken, f.object, body);
+  const created = await createSObject(instanceUrl, accessToken, f.object, body);
 
   let fileInfo = null;
   if (markdownBody) {
@@ -182,11 +182,6 @@ async function recordWeeklyHistory(
     contentVersionId: fileInfo?.contentVersionId || null,
     contentDocumentId: fileInfo?.contentDocumentId || null,
   };
-}
-
-async function updateExistingHistoricalData(instanceUrl, accessToken, objectName, id, body) {
-  await updateSObject(instanceUrl, accessToken, objectName, id, body);
-  return { id, success: true };
 }
 
 async function stampFeedbackEmailSent({ instanceUrl, accessToken }, contactIds, sentDateIso) {

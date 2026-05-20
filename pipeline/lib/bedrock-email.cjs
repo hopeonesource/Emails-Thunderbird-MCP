@@ -5,7 +5,7 @@ const crypto = require("crypto");
 /**
  * Bedrock-powered weekly email generator.
  *
- * Default model: anthropic.claude-sonnet-4-5 (override with BEDROCK_MODEL_ID).
+ * Default model: anthropic.claude-sonnet-4-5-20250929-v1:0 (override with BEDROCK_MODEL_ID).
  * The Bedrock client is loaded lazily so this module is fully unit-testable
  * without the AWS SDK installed (tests can inject a fake client).
  *
@@ -13,16 +13,18 @@ const crypto = require("crypto");
  *   { subject, htmlBody, markdownBody, modelId, sourceDataHash }
  */
 
-const DEFAULT_MODEL_ID = "anthropic.claude-sonnet-4-5";
-const SYSTEM_PROMPT = `You are an empathetic, concise weekly check-in email writer for a non-profit
-called Hope1Source. You ONLY use the structured weekly data provided for the SPECIFIC account
-in the user message. Never invent metrics, names, or events. Never reference data from any
-other account. Output strictly valid JSON with keys "subject", "html", and "markdown".
+const DEFAULT_MODEL_ID = "anthropic.claude-sonnet-4-5-20250929-v1:0";
+const SYSTEM_PROMPT = `You are a concise weekly check-in email writer for a non-profit
+called Hope1Source. You ONLY use the structured weekly check-in data provided for the SPECIFIC
+Salesforce accountId in the user message. Never invent metrics, names, events, causes, sentiment,
+needs, or recommendations. Never reference data from any other account. If the provided data is
+thin, say that the account had limited check-in activity for the week. Output strictly valid JSON
+with keys "subject", "html", and "markdown".
 
 Email constraints:
 - Mobile-friendly HTML, max-width 600px, table-based layout, system fonts
 - Friendly, plain language; no jargon
-- Highlight 1-3 wins, 1-2 watch-outs, and a single clear next step
+- Include only observations directly supported by the supplied metrics or check-in entries
 - Subject is short (<= 70 chars), specific, and personal to the account name
 - Do not include unsubscribe links or sender boilerplate (the human reviewer adds those in Gmail)
 - HTML must be self-contained (inline CSS only, no <script>, no remote images)
@@ -110,7 +112,7 @@ async function generateWeeklyEmail(accountWeeklyData, options = {}) {
   const body = {
     anthropic_version: "bedrock-2023-05-31",
     max_tokens: 1500,
-    temperature: 0.4,
+    temperature: 0.1,
     system: SYSTEM_PROMPT,
     messages: [
       {

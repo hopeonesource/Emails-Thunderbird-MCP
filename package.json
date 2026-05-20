@@ -34,9 +34,17 @@
     "test:lambda-handler": "node --test test/lambda-handler.test.cjs",
     "test:weekly-drafts": "node --test test/weekly-drafts.test.cjs",
     "weekly-drafts:dry": "node -e \"require('./pipeline/weekly-drafts-handler.js').handler({dryRun:true,nowIso:new Date().toISOString()}).then(r=>console.log(JSON.stringify(r,null,2)))\"",
+    "weekly-drafts:doctor": "node scripts/check-weekly-drafts-readiness.cjs",
+    "weekly-drafts:fixture-draft": "node -e \"require('./pipeline/weekly-drafts-handler.js').handler({fixtureDraftOnly:true,fixturePath:'fixtures/weekly-eligible-accounts.json',nowIso:new Date().toISOString()}).then(r=>console.log(JSON.stringify(r,null,2)))\"",
+    "weekly-drafts:doctor:keychain": "zsh -lc 'source ./scripts/load-weekly-drafts-keychain-env.zsh && node scripts/check-weekly-drafts-readiness.cjs --source keychain'",
+    "weekly-drafts:sync-env": "node scripts/sync-weekly-drafts-env.cjs",
+    "hop43:env:pull:keychain": "node scripts/pull-hop43-secrets-to-keychain.cjs",
+    "hop43:secrets:push:keychain": "node scripts/push-hop43-keychain-to-aws-secrets.cjs",
+    "hop43:aws:deploy": "node scripts/deploy-hop43-lambda-aws.cjs",
     "package:lambda": "node scripts/package-lambda-zip.cjs"
   },
   "optionalDependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.700.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
+    "@aws-sdk/client-secrets-manager": "^3.700.0"
   }
 }

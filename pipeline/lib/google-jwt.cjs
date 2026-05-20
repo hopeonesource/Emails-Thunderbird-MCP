@@ -10,7 +10,7 @@ const { URL } = require("url");
  * Required env (Lambda):
  *   GOOGLE_SERVICE_ACCOUNT_EMAIL
  *   GOOGLE_PRIVATE_KEY (PEM, with literal \n) OR GOOGLE_PRIVATE_KEY_PATH
- *   GMAIL_SUBJECT (workspace user to impersonate, e.g. checkins@hopewithlove.org)
+ *   GMAIL_SUBJECT (workspace user to impersonate, e.g. checkins@hope1source.me)
  *
  * Scope used: gmail.compose (drafts only; cannot send).
  */
