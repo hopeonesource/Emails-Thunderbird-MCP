@@ -52,8 +52,9 @@ for (const output of outputs) {
   if (fs.existsSync(output.zip)) fs.unlinkSync(output.zip);
 }
 
-function zipWithTar(outZip) {
-  const r = spawnSync("tar", ["-caf", outZip, "-C", stage, "."], {
+function zipWithZip(outZip) {
+  const r = spawnSync("zip", ["-qr", outZip, "."], {
+    cwd: stage,
     stdio: "inherit",
     encoding: "utf8",
   });
@@ -62,10 +63,13 @@ function zipWithTar(outZip) {
 
 function zipWithPowerShell(outZip) {
   const dest = outZip.replace(/'/g, "''");
+  const literals = ["pipeline", "fixtures"];
+  if (fs.existsSync(path.join(stage, "node_modules"))) literals.push("node_modules");
+  const literalList = literals.map((item) => `'${item.replace(/'/g, "''")}'`).join(",");
   const cmd = [
     "$ErrorActionPreference='Stop'",
     `if (Test-Path -LiteralPath '${dest}') { Remove-Item -LiteralPath '${dest}' -Force }`,
-    `Compress-Archive -LiteralPath @('pipeline','fixtures') -DestinationPath '${dest}' -Force`,
+    `Compress-Archive -LiteralPath @(${literalList}) -DestinationPath '${dest}' -Force`,
   ].join("; ");
   const r = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], {
     cwd: stage,
@@ -75,16 +79,16 @@ function zipWithPowerShell(outZip) {
 }
 
 for (const output of outputs) {
-  let ok = zipWithTar(output.zip);
+  let ok = zipWithZip(output.zip);
   if (!ok && process.platform === "win32") {
-    console.error("[package-lambda-zip] tar failed; trying PowerShell Compress-Archive...");
+    console.error("[package-lambda-zip] zip failed; trying PowerShell Compress-Archive...");
     if (fs.existsSync(output.zip)) fs.unlinkSync(output.zip);
     ok = zipWithPowerShell(output.zip);
   }
 
   if (!ok) {
     console.error(
-      "[package-lambda-zip] could not create zip. Install a recent Windows build with tar, or use PowerShell."
+      "[package-lambda-zip] could not create zip. Install zip, or use PowerShell on Windows."
     );
     fs.rmSync(stage, { recursive: true, force: true });
     process.exit(1);
