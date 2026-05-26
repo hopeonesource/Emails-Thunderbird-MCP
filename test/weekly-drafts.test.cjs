@@ -20,6 +20,7 @@ const {
   generateWeeklyEmail,
 } = require("../pipeline/lib/bedrock-email.cjs");
 const { buildMime, base64UrlEncode, stripHtml } = require("../pipeline/lib/gmail-draft.cjs");
+const { loadConfiguredSecrets, parseSecretIds } = require("../pipeline/lib/secrets-manager.cjs");
 
 const FIXTURE_PATH = path.join(__dirname, "..", "fixtures", "weekly-eligible-accounts.json");
 
@@ -117,7 +118,7 @@ describe("bedrock-email helpers", () => {
 describe("gmail-draft helpers", () => {
   it("builds multipart MIME with subject and bodies", () => {
     const mime = buildMime({
-      from: "checkins@hopewithlove.org",
+      from: "checkins@hope1source.me",
       to: "v@hopewithlove.org",
       subject: "Test",
       htmlBody: "<p>Hi</p>",
@@ -134,6 +135,53 @@ describe("gmail-draft helpers", () => {
 
   it("stripHtml removes tags", () => {
     assert.equal(stripHtml("<p>Hi <b>there</b></p>"), "Hi there");
+  });
+});
+
+describe("secrets-manager helpers", () => {
+  it("parses configured secret ids from specific and shared env vars", () => {
+    const ids = parseSecretIds({
+      GOOGLE_SECRET_ID: "google-secret",
+      WEEKLY_DRAFTS_SECRET_IDS: "shared-one, shared-two",
+    });
+    assert.deepEqual(ids, ["google-secret", "shared-one", "shared-two"]);
+  });
+
+  it("loads only approved secret keys without overwriting explicit env values", async () => {
+    const env = {
+      GOOGLE_SECRET_ID: "google-secret",
+      GOOGLE_SERVICE_ACCOUNT_EMAIL: "explicit@example.org",
+    };
+    const sent = [];
+    const client = {
+      async send(cmd) {
+        sent.push(cmd.input.SecretId);
+        return {
+          SecretString: JSON.stringify({
+            GOOGLE_SERVICE_ACCOUNT_EMAIL: "secret@example.org",
+            GOOGLE_PRIVATE_KEY: "private-key",
+            UNRELATED_SECRET: "ignored",
+          }),
+        };
+      },
+    };
+    class FakeGetSecretValueCommand {
+      constructor(input) {
+        this.input = input;
+      }
+    }
+
+    const result = await loadConfiguredSecrets({
+      env,
+      client,
+      getSecretValueCommandCtor: FakeGetSecretValueCommand,
+    });
+
+    assert.deepEqual(sent, ["google-secret"]);
+    assert.equal(env.GOOGLE_SERVICE_ACCOUNT_EMAIL, "explicit@example.org");
+    assert.equal(env.GOOGLE_PRIVATE_KEY, "private-key");
+    assert.equal(env.UNRELATED_SECRET, undefined);
+    assert.deepEqual(result.loadedKeys, ["GOOGLE_PRIVATE_KEY"]);
   });
 });
 
@@ -161,6 +209,55 @@ describe("orchestrator (dry run)", () => {
 });
 
 describe("orchestrator (mocked live path)", () => {
+  it("creates fixture-backed real drafts without Salesforce when fixtureDraftOnly is enabled", async () => {
+    const gmailCalls = [];
+    const summary = await runWeeklyDrafts({
+      fixtureDraftOnly: true,
+      fixturePath: FIXTURE_PATH,
+      nowIso: "2026-04-30T12:00:00Z",
+      reviewRecipient: "reviewer@example.org",
+      existsForWeek: async () => {
+        throw new Error("Salesforce idempotency should not run in fixtureDraftOnly mode");
+      },
+      fetchLatestHistoricalData: async () => {
+        throw new Error("Salesforce historical data should not run in fixtureDraftOnly mode");
+      },
+      fetchRecentClientFeedback: async () => {
+        throw new Error("Salesforce feedback should not run in fixtureDraftOnly mode");
+      },
+      recordWeeklyHistory: async () => {
+        throw new Error("Salesforce writeback should not run in fixtureDraftOnly mode");
+      },
+      stampFeedbackEmailSent: async () => {
+        throw new Error("Salesforce contact stamping should not run in fixtureDraftOnly mode");
+      },
+      bedrockGenerate: async (acct) => ({
+        subject: `Weekly: ${acct.accountName}`,
+        htmlBody: `<p>${acct.accountName}</p>`,
+        markdownBody: `# ${acct.accountName}`,
+        modelId: "anthropic.claude-sonnet-4-5",
+        sourceDataHash: `hash-${acct.accountId}`,
+      }),
+      gmailCreateDraft: async (args) => {
+        gmailCalls.push(args);
+        return {
+          draftId: `fixture-draft-${args.accountId}`,
+          threadId: `fixture-thread-${args.accountId}`,
+          messageId: `fixture-message-${args.accountId}`,
+        };
+      },
+    });
+
+    assert.equal(summary.fixtureDraftOnly, true);
+    assert.equal(summary.draftsCreated, 2);
+    assert.equal(summary.failed, 0);
+    assert.deepEqual(summary.perAccount.map((a) => a.status), [
+      "draft_created_fixture",
+      "draft_created_fixture",
+    ]);
+    assert.deepEqual(gmailCalls.map((c) => c.to), [["reviewer@example.org"], ["reviewer@example.org"]]);
+  });
+
   it("creates draft + history per account, isolating by accountId", async () => {
     const seenAccountsForBedrock = [];
     const seenAccountsForGmail = [];

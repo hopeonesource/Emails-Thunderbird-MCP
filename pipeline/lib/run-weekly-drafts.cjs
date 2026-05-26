@@ -22,12 +22,14 @@ const { isoWeekWindow } = require("./week-window.cjs");
  *
  * options:
  *   dryRun         (bool) - skip Bedrock/Gmail/Salesforce-write side effects, return planned actions
- *   fixturePath    (string) - dry-run account/recipient fixture
+ *   fixtureDraftOnly (bool) - use fixture data, call live Bedrock/Gmail, skip Salesforce reads/writes
+ *   fixturePath    (string) - fixture account/recipient data
  *   nowIso         (string) - override current time (for tests)
  *   bedrockGenerate(account) -> { subject, htmlBody, markdownBody, modelId, sourceDataHash }
  *   gmailCreateDraft({ subject, htmlBody, accountId }) -> { draftId, threadId, messageId }
  *   sf             { instanceUrl, accessToken } - inject for tests; otherwise built from JWT
  *   recipients     {[accountId]: [emails]} - override recipients for the draft
+ *   reviewRecipient string|string[] - fixture smoke recipient override
  *
  * Account isolation invariant: every Bedrock call, every Gmail draft, and every
  * Salesforce write is keyed strictly by the Salesforce Account.Id of the record
@@ -35,6 +37,7 @@ const { isoWeekWindow } = require("./week-window.cjs");
  */
 async function runWeeklyDrafts(options = {}) {
   const dryRun = options.dryRun === true;
+  const fixtureDraftOnly = options.fixtureDraftOnly === true;
   const now = options.nowIso ? new Date(options.nowIso) : new Date();
   const { weekStart, weekEnd } = isoWeekWindow(now);
   const existsForWeek = options.existsForWeek || existsForWeekDefault;
@@ -48,6 +51,7 @@ async function runWeeklyDrafts(options = {}) {
     weekStart,
     weekEnd,
     dryRun,
+    fixtureDraftOnly,
     totalEligible: 0,
     draftsCreated: 0,
     skipped: 0,
@@ -55,7 +59,7 @@ async function runWeeklyDrafts(options = {}) {
     perAccount: [],
   };
 
-  const accountContexts = await loadEligibleAccounts(options, dryRun);
+  const accountContexts = await loadEligibleAccounts(options, dryRun, fixtureDraftOnly);
   summary.totalEligible = accountContexts.length;
 
   for (const acct of accountContexts) {
@@ -69,8 +73,8 @@ async function runWeeklyDrafts(options = {}) {
     };
 
     try {
-      const sf = options.sf || (dryRun ? null : await getInjectedOrLiveSf(options));
-      if (!dryRun) {
+      const sf = options.sf || (dryRun || fixtureDraftOnly ? null : await getInjectedOrLiveSf(options));
+      if (!dryRun && !fixtureDraftOnly) {
         if (await existsForWeek(sf, accountId, weekStart)) {
           perAccount.status = "skipped_existing";
           summary.skipped += 1;
@@ -81,15 +85,15 @@ async function runWeeklyDrafts(options = {}) {
 
       const historicalData =
         acct.historicalData ||
-        (dryRun ? null : await fetchLatestHistoricalData(sf, accountId));
-      if (!dryRun && !historicalData) {
+        (dryRun || fixtureDraftOnly ? null : await fetchLatestHistoricalData(sf, accountId));
+      if (!dryRun && !fixtureDraftOnly && !historicalData) {
         throw new Error(`No Historical_Data__c found for Account ${accountId}`);
       }
 
       const recentFeedback =
         acct.recentFeedback ||
         acct.recentCheckins ||
-        (dryRun ? [] : await fetchRecentClientFeedback(sf, accountId));
+        (dryRun || fixtureDraftOnly ? [] : await fetchRecentClientFeedback(sf, accountId));
 
       const accountWeeklyData = buildAccountWeeklyData(acct, weekStart, weekEnd, historicalData, recentFeedback);
 
@@ -113,15 +117,13 @@ async function runWeeklyDrafts(options = {}) {
         continue;
       }
 
-      const recipients =
-        (options.recipients && options.recipients[accountId]) ||
-        (acct.recipients || []).map((r) => r.email).filter(Boolean);
+      const recipients = resolveRecipients(options, accountId, acct, fixtureDraftOnly);
       if (recipients.length === 0) {
         throw new Error(`No eligible Service Provider recipient email found for Account ${accountId}`);
       }
       const fromAddress =
         process.env.GMAIL_FROM ||
-        `Hope1Source Check-ins <${process.env.GMAIL_SUBJECT || "checkins@hopewithlove.org"}>`;
+        `Hope1Source Check-ins <${process.env.GMAIL_SUBJECT || "checkins@hope1source.me"}>`;
 
       const draft = options.gmailCreateDraft
         ? await options.gmailCreateDraft({
@@ -135,6 +137,13 @@ async function runWeeklyDrafts(options = {}) {
 
       perAccount.gmailDraftId = draft.draftId;
       perAccount.gmailThreadId = draft.threadId;
+
+      if (fixtureDraftOnly) {
+        perAccount.status = "draft_created_fixture";
+        summary.draftsCreated += 1;
+        summary.perAccount.push(perAccount);
+        continue;
+      }
 
       const history = await recordWeeklyHistory(sf, {
         accountId,
@@ -171,11 +180,12 @@ async function runWeeklyDrafts(options = {}) {
   return summary;
 }
 
-async function loadEligibleAccounts(options, dryRun) {
+async function loadEligibleAccounts(options, dryRun, fixtureDraftOnly) {
   if (Array.isArray(options.accounts)) return options.accounts;
 
   const useFixture =
     dryRun ||
+    fixtureDraftOnly ||
     Boolean(options.fixturePath) ||
     Boolean(process.env.WEEKLY_DRAFTS_FIXTURE_PATH);
 
@@ -191,6 +201,25 @@ async function loadEligibleAccounts(options, dryRun) {
 
   const sf = options.sf || (await getInjectedOrLiveSf(options));
   return fetchEligibleAccounts(sf);
+}
+
+function resolveRecipients(options, accountId, acct, fixtureDraftOnly) {
+  if (options.recipients && options.recipients[accountId]) {
+    return normalizeRecipients(options.recipients[accountId]);
+  }
+
+  if (fixtureDraftOnly) {
+    const reviewRecipients = normalizeRecipients(options.reviewRecipient || process.env.GMAIL_REVIEW_RECIPIENT);
+    if (reviewRecipients.length > 0) return reviewRecipients;
+  }
+
+  return normalizeRecipients((acct.recipients || []).map((r) => r.email));
+}
+
+function normalizeRecipients(value) {
+  if (!value) return [];
+  const list = Array.isArray(value) ? value : String(value).split(",");
+  return list.map((v) => String(v).trim()).filter(Boolean);
 }
 
 function buildStubEmail(accountWeeklyData) {

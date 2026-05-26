@@ -34,9 +34,11 @@
     "test:lambda-handler": "node --test test/lambda-handler.test.cjs",
     "test:weekly-drafts": "node --test test/weekly-drafts.test.cjs",
     "weekly-drafts:dry": "node -e \"require('./pipeline/weekly-drafts-handler.js').handler({dryRun:true,nowIso:new Date().toISOString()}).then(r=>console.log(JSON.stringify(r,null,2)))\"",
-    "package:lambda": "node scripts/package-lambda-zip.cjs"
+    "package:lambda": "node scripts/package-lambda-zip.cjs",
+    "package:weekly-drafts": "node scripts/package-weekly-drafts-zip.cjs"
   },
   "optionalDependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.700.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
+    "@aws-sdk/client-secrets-manager": "^3.700.0"
   }
 }

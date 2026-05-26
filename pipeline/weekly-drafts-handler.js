@@ -1,6 +1,7 @@
 "use strict";
 
 const { runWeeklyDrafts } = require("./lib/run-weekly-drafts.cjs");
+const { loadConfiguredSecrets } = require("./lib/secrets-manager.cjs");
 
 function envBool(name) {
   const v = process.env[name];
@@ -22,19 +23,26 @@ function eventBool(event, key) {
  *
  * Event (optional):
  *   { dryRun: true, fixturePath: "/var/task/fixtures/weekly-eligible-accounts.json", nowIso: "2026-04-30T12:00:00Z" }
+ *   { fixtureDraftOnly: true, reviewRecipient: "reviewer@example.org" }
  */
 exports.handler = async (event = {}) => {
+  const secrets = await loadConfiguredSecrets();
   const dryRun = eventBool(event, "dryRun") || envBool("WEEKLY_DRAFTS_DRY_RUN");
+  const fixtureDraftOnly = eventBool(event, "fixtureDraftOnly") || envBool("WEEKLY_DRAFTS_FIXTURE_DRAFT_ONLY");
   const summary = await runWeeklyDrafts({
     dryRun,
+    fixtureDraftOnly,
     fixturePath: event.fixturePath,
     nowIso: event.nowIso,
+    reviewRecipient: event.reviewRecipient,
   });
   return {
     ok: summary.failed === 0,
     weekStart: summary.weekStart,
     weekEnd: summary.weekEnd,
     dryRun: summary.dryRun,
+    fixtureDraftOnly: summary.fixtureDraftOnly,
+    secretsLoaded: secrets.loadedSecretIds.length,
     totalEligible: summary.totalEligible,
     draftsCreated: summary.draftsCreated,
     skipped: summary.skipped,

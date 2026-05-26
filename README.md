@@ -8,7 +8,7 @@
 This repository contains two related capabilities:
 
 1. **Thunderbird MCP** -- a local extension + bridge that exposes 35 tools so any MCP-compatible AI assistant can read, compose, and organize Thunderbird mail.
-2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible Service Provider Contacts from Salesforce via JWT/SOQL, groups them to one draft per Account, generates a polished mobile-friendly HTML email per Account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hopewithlove.org`, updates the same latest `Historical_Data__c` record, attaches the email as Markdown, and stamps each recipient Contact's `Last_Feedback_Email_Sent__c` when the draft is created.
+2. **Weekly Check-in Email Drafts (V1)** -- an AWS Lambda pipeline that pulls eligible Service Provider Contacts from Salesforce via JWT/SOQL, groups them to one draft per Account, generates a polished mobile-friendly HTML email per Account using AWS Bedrock (Claude Sonnet 4.5), saves it as a Gmail draft from `checkins@hope1source.me`, updates the same latest `Historical_Data__c` record, attaches the email as Markdown, and stamps each recipient Contact's `Last_Feedback_Email_Sent__c` when the draft is created.
 
 Jump to:
 
@@ -163,12 +163,12 @@ Create a Google Cloud project under the Workspace org and:
 2. Create a **service account**. Generate a JSON key.
 3. In Workspace Admin (`admin.google.com`) **Security > Access and data control > API controls > Domain-wide delegation**, add the service account's client ID with the single scope:
    - `https://www.googleapis.com/auth/gmail.compose`
-4. Make sure `checkins@hopewithlove.org` is a real, monitored Workspace mailbox in `hopewithlove.org`.
+4. Make sure `checkins@hope1source.me` is a real, monitored Workspace mailbox in `hope1source.me`.
 5. Set in Lambda env:
-   - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
-   - `GOOGLE_PRIVATE_KEY` (PEM, escape newlines as `\n`) **or** `GOOGLE_PRIVATE_KEY_PATH`
-   - `GMAIL_SUBJECT=checkins@hopewithlove.org`
-   - `GMAIL_FROM=Hope1Source Check-ins <checkins@hopewithlove.org>`
+   - `GOOGLE_SECRET_ID=hope1source/google-service-account` for Secrets Manager loading
+   - `GMAIL_SUBJECT=checkins@hope1source.me`
+   - `GMAIL_FROM=Hope1Source Check-ins <checkins@hope1source.me>`
+   - `GMAIL_REVIEW_RECIPIENT=Tim@hopewithlove.org,fadames@hopewithlove.org,vthornton@hopewithlove.org` for fixture smoke tests
 
 > **Why `gmail.compose` only?** This scope can read and write the user's drafts but **cannot send mail**. This is the smallest scope that lets the Lambda create drafts safely. A human still has to click Send in Gmail.
 
@@ -212,7 +212,16 @@ Create a Google Cloud project under the Workspace org and:
 | Google service account key   | AWS Secrets Manager `hope1source/google-service-account` |
 | Bedrock                      | IAM role only -- no static keys          |
 
-Loader convention: secrets are read at Lambda init and exposed via `process.env`. Keep the JSON shape simple: `{ "SF_PRIVATE_KEY": "...", "GOOGLE_PRIVATE_KEY": "..." }`. Never commit real values.
+Loader convention: set `GOOGLE_SECRET_ID`, `SF_SECRET_ID`, or comma-separated `WEEKLY_DRAFTS_SECRET_IDS` on the Lambda. At startup, the handler reads those AWS Secrets Manager JSON secrets and exposes only approved keys through `process.env`. Keep non-secret config such as `GMAIL_SUBJECT`, `GMAIL_FROM`, `BEDROCK_REGION`, and `BEDROCK_MODEL_ID` as Lambda environment variables.
+
+Example Google secret JSON:
+
+```json
+{
+  "GOOGLE_SERVICE_ACCOUNT_EMAIL": "weekly-drafts@project.iam.gserviceaccount.com",
+  "GOOGLE_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+}
+```
 
 ### Local development & dry-run
 
@@ -220,9 +229,12 @@ Loader convention: secrets are read at Lambda init and exposed via `process.env`
 npm install
 npm run test:weekly-drafts          # all unit tests, no network
 npm run weekly-drafts:dry           # full dry run with the bundled fixture
+npm run package:weekly-drafts       # build Lambda zip for Bedrock + Gmail smoke testing
 ```
 
 Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic stub HTML/Markdown body from the fixture so you can iterate on the orchestrator and downstream wiring without credentials.
+
+While Salesforce sandbox is not ready, use fixture draft mode to call live Bedrock and create real Gmail drafts without Salesforce reads or writes. See [docs/weekly-drafts-live-readiness.md](docs/weekly-drafts-live-readiness.md).
 
 ### Operations
 
@@ -230,7 +242,7 @@ Dry-run does not call Bedrock, Gmail, or Salesforce. It produces a deterministic
 - **Failure isolation:** one account's failure increments `summary.failed` but never blocks the others. The handler returns `ok: false` if any account failed so you can alarm on it.
 - **Alarms:** create a CloudWatch metric filter on `"failed":` > 0 in the handler return JSON, or on `Errors > 0` for the function.
 - **Idempotency:** safe to re-run within the same week. Existing draft_created/sent rows are skipped.
-- **Manual invoke:** send `{ "dryRun": true }` to test against the bundled fixture.
+- **Manual invoke:** send `{ "dryRun": true }` to test against the bundled fixture, or `{ "fixtureDraftOnly": true, "reviewRecipient": "Tim@hopewithlove.org,fadames@hopewithlove.org,vthornton@hopewithlove.org" }` to create real Gmail drafts from fixture data without touching Salesforce.
 
 ### Security best practices (V1)
 
