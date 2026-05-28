@@ -166,9 +166,20 @@ That's it. Your AI can now access Thunderbird.
 
 ## Development
 
+Team development access, secret loading, and blast-radius rules are documented in [`docs/team-dev-access-standard.md`](docs/team-dev-access-standard.md). Start with:
+
+```bash
+npm run dev:doctor
+npm run dev:secrets
+npm run dev:smoke
+```
+
 ```bash
 # Build the extension
 ./scripts/build.sh
+
+# Run the local test suite
+npm test
 
 # Test via the bridge (handles auth automatically)
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node mcp-bridge.cjs
