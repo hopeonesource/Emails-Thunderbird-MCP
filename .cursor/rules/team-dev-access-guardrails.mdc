@@ -1,0 +1,19 @@
+---
+description: HopeOneSource team dev access and blast-radius guardrails for all issues
+alwaysApply: true
+---
+
+# Team Dev Access Guardrails
+
+- Apply these rules to every Linear issue and branch, not only HOP-42.
+- Read `docs/team-dev-access-standard.md` before adding new local setup, secret, AWS, Salesforce, Gmail, Google, Twilio, or deployment behavior.
+- Default local teammate development to the AWS profile `HopeOneSource-Dev`.
+- Use `HOP42-Sandbox-Developer` only as a temporary compatibility profile when older issue notes require it.
+- Never paste or log secrets, access keys, session tokens, private keys, OAuth tokens, phone numbers, or raw sensitive check-in data.
+- Use `npm run dev:doctor` before live integration debugging.
+- Use `npm run dev:secrets` to load approved dev secrets into ignored local files.
+- Use `npm run dev:smoke` before handing off setup or claiming local readiness.
+- Every issue must name its blast radius level from `docs/team-dev-access-standard.md`.
+- Production deploys must go through reviewed GitHub Actions and GitHub Environment approval.
+- Local laptop or Mac Mini workflows must not deploy to production.
+- Live sends, broad writes, or shared dev-data mutations require explicit issue approval and a clear target allowlist.

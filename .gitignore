@@ -17,6 +17,12 @@ Thumbs.db
 # MCP config (contains local paths)
 .mcp.json
 
+# Local team/dev secrets
+.env
+.env.*
+!.env.example
+.secrets/
+
 # Node.js
 node_modules/
 package-lock.json

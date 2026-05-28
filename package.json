@@ -15,6 +15,12 @@
     "ai",
     "claude"
   ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "dev:doctor": "bash scripts/team-dev-doctor.sh",
+    "dev:secrets": "bash scripts/team-dev-secrets.sh",
+    "dev:smoke": "bash scripts/team-dev-smoke.sh"
+  },
   "bin": {
     "thunderbird-mcp": "./mcp-bridge.cjs"
   },
